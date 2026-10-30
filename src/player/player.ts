@@ -460,6 +460,7 @@ export class PlayerService implements vscode.Disposable {
   }
 
   private armStallWatch(): void {
+    if (this.output.kind === "native" || this.nativeSession) return;
     if (this.stallTimer) clearTimeout(this.stallTimer);
     const token = this.playToken;
     this.stallTimer = setTimeout(() => {
@@ -815,7 +816,7 @@ export class PlayerService implements vscode.Disposable {
         bits,
         sampleFormat,
         exclusive: cfg.output.exclusive,
-        bufferMs: cfg.output.bufferMs,
+        bufferMs: Math.max(40, cfg.output.bufferMs),
         volume: this.volume,
       });
       this.nativeSession = session;

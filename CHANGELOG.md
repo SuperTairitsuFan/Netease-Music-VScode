@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.18
+
+- 原生输出不再被 6.5 秒 WebAudio 看门狗反复重启，修复播放撕裂/爆音。
+- 原生缓冲最低提高到 40ms，降低 WASAPI 192k/32 下的 underrun。
+- 保留 PCM drain 竞态修复与 WebAudio 回退。
+
 ## 0.3.17
 
 - 修复原生引擎 stdin drain 竞态（PCM 数据写入超时的根因之一）。
