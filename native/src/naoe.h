@@ -17,6 +17,7 @@
 #define NAOE_FRAME_CONTROL 1u
 #define NAOE_FRAME_PCM 2u
 #define NAOE_FRAME_END 3u
+#define NAOE_FRAME_PCM_INT 4u
 
 typedef struct {
   char device[512];
@@ -45,6 +46,8 @@ struct NaoeBackend {
               size_t err_len, char *supported, size_t supported_len);
   /* Blocking write of `frames` float32 frames. Returns frames written or < 0. */
   int (*write)(void *handle, const float *interleaved, int frames);
+  /* Direct integer PCM: bits 16/24/32; 24 is stored in 4-byte containers. */
+  int (*write_int)(void *handle, const void *interleaved, int frames, int bits);
   /* Frames actually played by the device (for progress reporting). */
   int (*position)(void *handle, uint64_t *played_frames);
   void (*pause)(void *handle, int paused);

@@ -342,7 +342,12 @@ function renderSystem(): string {
       { value: "native", label: "仅原生引擎" },
     ])}
     <div class="set-row"><div><div class="label">输出设备</div><div class="hint">${esc(native.devices?.find((device) => device.id === cfg.device)?.name ?? (cfg.device || "系统默认设备"))}</div></div><div class="control"><button class="btn small" data-act="probeAudio">${icon("pulse", 11)} 探测</button><button class="btn small" data-act="selectDevice">${icon("device", 11)} 选择设备</button></div></div>
+    ${selectRow("原生后端", "WASAPI 系统音频；ASIO 需 DAC 厂商驱动（bit-perfect 推荐）", "output.backend", cfg.nativeBackend, [
+      { value: "wasapi", label: "WASAPI" },
+      { value: "asio", label: "ASIO" },
+    ])}
     ${switchRow("独占模式", "Windows WASAPI Exclusive / Linux ALSA hw: 直连，绕过系统混音器", "output.exclusive", cfg.exclusive)}
+    ${switchRow("Bit-perfect（严格）", "强制原生 Exclusive + 源采样率/位深；音量固定 100%，不做增益", "output.bitPerfect", cfg.bitPerfect)}
     ${selectRow("采样率", "auto 跟随音源；手动值必须与音源一致（引擎不做重采样）", "output.sampleRate", cfg.sampleRate, formatOptions.map((value) => ({ value, label: value === "auto" ? "auto（跟随音源）" : `${Number(value) / 1000} kHz` })))}
     ${selectRow("位深", "32 bit 是否可用取决于 USB DAC 与驱动", "output.bitDepth", cfg.bitDepth, bitOptions.map((value) => ({ value, label: value === "auto" ? "auto" : `${value} bit` })))}
     ${selectRow("样本格式", "设备端格式；引擎输入永远是 float32 PCM", "output.sampleFormat", cfg.sampleFormat, sampleFormats.map((value) => ({ value, label: value === "auto" ? "auto" : value })))}

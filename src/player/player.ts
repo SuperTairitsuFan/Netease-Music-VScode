@@ -66,6 +66,9 @@ export class PlayerService implements vscode.Disposable {
   private nativeExpectedFrames = 0;
   private nativeSongId = 0;
   private nativeWriteChain: Promise<void> = Promise.resolve();
+  private nativeBeginChain: Promise<void> = Promise.resolve();
+  private nativeBeginToken = 0;
+  private nativeRetry = 0;
   private lastEmit = 0;
   private emitTimer: NodeJS.Timeout | undefined;
   private saveTimer: NodeJS.Timeout | undefined;
@@ -224,8 +227,23 @@ export class PlayerService implements vscode.Disposable {
       return;
     }
     const webAudioEnabled = await this.components.isEnabled("core.player");
-    const preferWebAudio = cfg.output.mode !== "native";
-    if (preferWebAudio) {
+    const bitPerfect = cfg.output.bitPerfect;
+    const preferWebAudio = !bitPerfect && cfg.output.mode !== "native";
+    if (bitPerfect) {
+      this.output = ready
+        ? {
+            kind: "native",
+            label: `Native Engine · ${record?.backend ?? "系统音频"}`,
+            detail: "Bit-perfect · Exclusive · 源采样率/位深",
+            backend: record?.backend,
+          }
+        : {
+            kind: "none",
+            label: "Bit-perfect 不可用",
+            detail: "Bit-perfect 需要原生引擎；当前原生引擎未就绪",
+            unavailableReason: record?.reason ?? "native engine not ready",
+          };
+    } else if (preferWebAudio) {
       this.output = webAudioEnabled
         ? {
             kind: "webaudio",
@@ -277,9 +295,10 @@ export class PlayerService implements vscode.Disposable {
 
   private async shouldUseNative(): Promise<boolean> {
     const cfg = this.getConfig();
+    const record = await this.components.nativeRecord();
+    if (cfg.output.bitPerfect) return record?.status === "ready";
     if (cfg.output.mode !== "native") return false;
     if (this.forceWebAudio) return false;
-    const record = await this.components.nativeRecord();
     return record?.status === "ready";
   }
 
@@ -291,7 +310,8 @@ export class PlayerService implements vscode.Disposable {
   }
 
   private nativeStrict(): boolean {
-    return this.getConfig().output.mode === "native";
+    const cfg = this.getConfig();
+    return cfg.output.mode === "native" || cfg.output.bitPerfect;
   }
 
   // ------------------------------------------------------------ playback
@@ -422,6 +442,7 @@ export class PlayerService implements vscode.Disposable {
       return;
     }
     if (this.nativeSession) {
+      this.post({ type: "control", action: "play" });
       this.nativeSession.resume().catch(() => undefined);
       this.playing = true;
       this.emit();
@@ -483,6 +504,12 @@ export class PlayerService implements vscode.Disposable {
   }
 
   async setVolume(volume: number): Promise<void> {
+    if (this.getConfig().output.bitPerfect) {
+      this.volume = 1;
+      this.post({ type: "control", action: "volume", value: 1 });
+      this.emit();
+      return;
+    }
     this.volume = Math.max(0, Math.min(1, volume));
     this.post({ type: "control", action: "volume", value: this.volume });
     this.nativeSession?.setVolume(this.volume);
@@ -675,6 +702,8 @@ export class PlayerService implements vscode.Disposable {
             gain: resolved.gain,
             trialEnd: this.trialEnd,
             sourceSampleRate: resolved.sampleRate,
+            sourceBits: this.getConfig().output.backend === "asio" ? 32 : this.sourceBits(resolved),
+            integerPcm: this.getConfig().output.bitPerfect,
           };
           this.mediaLoaded = true;
     this.armStallWatch();
@@ -706,6 +735,8 @@ export class PlayerService implements vscode.Disposable {
         gain: resolved.gain,
         trialEnd: this.trialEnd,
         sourceSampleRate: resolved.sampleRate,
+        sourceBits: this.getConfig().output.backend === "asio" ? 32 : this.sourceBits(resolved),
+        integerPcm: this.getConfig().output.bitPerfect,
       };
       this.mediaLoaded = true;
     this.armStallWatch();
@@ -725,6 +756,15 @@ export class PlayerService implements vscode.Disposable {
       this.emit();
       this.post({ type: "playerError", message: this.error });
     }
+  }
+
+  private sourceBits(resolved: SongUrlResult): number {
+    if (!resolved.type || !/flac|wave|wav/i.test(resolved.type)) return 16;
+    const rate = resolved.sampleRate ?? 44100;
+    const inferred = resolved.br ? Math.round(resolved.br / (rate * 2)) : 0;
+    if (inferred >= 20) return 24;
+    if (/hires|jymaster/i.test(resolved.level ?? "")) return 24;
+    return 16;
   }
 
   private async resolveUrl(song: Track): Promise<SongUrlResult> {
@@ -785,11 +825,16 @@ export class PlayerService implements vscode.Disposable {
 
   // --------------------------------------------------------- native path
 
-  private async handleNativeBegin(msg: Extract<WebviewMessage, { type: "nativeBegin" }>): Promise<void> {
+  private async handleNativeBegin(
+    msg: Extract<WebviewMessage, { type: "nativeBegin" }>,
+    token: number,
+  ): Promise<void> {
     const cfg = this.getConfig();
     const record = await this.components.nativeRecord();
     if (!record?.entryPath) throw new Error("原生引擎组件不存在");
-    const requestedRate = cfg.output.sampleRate === "auto" ? msg.sampleRate : Number(cfg.output.sampleRate);
+    const bitPerfect = cfg.output.bitPerfect;
+    const requestedRate =
+      bitPerfect || cfg.output.sampleRate === "auto" ? msg.sampleRate : Number(cfg.output.sampleRate);
     if (requestedRate !== msg.sampleRate) {
       const message =
         `输出采样率 ${requestedRate} Hz 与音源 ${msg.sampleRate} Hz 不一致；` +
@@ -808,39 +853,69 @@ export class PlayerService implements vscode.Disposable {
       this.post({ type: "playerError", message });
       return;
     }
-    const rate = msg.sampleRate;
-    const exclusive = cfg.output.exclusive || rate > 48000;
+    const rate = requestedRate;
+    const exclusive = bitPerfect || cfg.output.exclusive || rate > 48000;
     // WASAPI shared mode often rejects 32-bit WAVEFORMATEXTENSIBLE even when
     // the device advertises it; 16-bit is universally accepted by the mixer.
-    const bits = exclusive
-      ? (cfg.output.bitDepth === "auto" ? 32 : Number(cfg.output.bitDepth))
-      : 16;
-    const sampleFormat = exclusive
-      ? (cfg.output.sampleFormat === "auto" ? "f32le" : cfg.output.sampleFormat)
-      : "s16le";
+    const bits = bitPerfect
+      ? Math.max(16, Math.min(32, Number(msg.bits || 16)))
+      : exclusive
+        ? (cfg.output.bitDepth === "auto" ? 32 : Number(cfg.output.bitDepth))
+        : 16;
+    const sampleFormat = bitPerfect
+      ? (bits === 16 ? "s16le" : bits === 24 ? "s24le" : "s32le")
+      : exclusive
+        ? (cfg.output.sampleFormat === "auto" ? "f32le" : cfg.output.sampleFormat)
+        : "s16le";
     await this.stopNative();
+    if (token !== this.nativeBeginToken) return;
     this.nativeSongId = msg.songId;
     this.nativeReceivedFrames = 0;
     this.nativeExpectedFrames = msg.length;
     this.nativeStartPosition = this.position;
     this.finishedNative = false;
-    log.info("native configure", { rate, bits, sampleFormat, exclusive, bufferMs: Math.max(40, cfg.output.bufferMs) });
+    const backend = cfg.output.backend === "asio" ? "asio" : "wasapi";
+    const device = backend === "asio" ? "default" : cfg.output.device || "default";
+    log.info("native configure", { backend, device, rate, bits, sampleFormat, exclusive, bufferMs: Math.max(40, cfg.output.bufferMs), volume: this.volume });
+    const options = {
+      device,
+      sampleRate: rate,
+      channels: msg.channels,
+      bits,
+      sampleFormat,
+      // WASAPI shared mode cannot open 96k/192k on many devices. High-rate
+      // native playback must use exclusive mode; otherwise configure fails
+      // before PCM starts.
+      exclusive,
+      bufferMs: Math.max(40, cfg.output.bufferMs),
+      volume: bitPerfect ? 1 : this.volume,
+    };
     try {
-      const session = await NativeEngineSession.start(record.entryPath, {
-        device: cfg.output.device || "default",
-        sampleRate: rate,
-        channels: msg.channels,
-        bits,
-        sampleFormat,
-        // WASAPI shared mode cannot open 96k/192k on many devices. High-rate
-        // native playback must use exclusive mode; otherwise configure fails
-        // before PCM starts.
-        exclusive,
-        bufferMs: Math.max(40, cfg.output.bufferMs),
-        volume: this.volume,
-      });
+      let session: NativeEngineSession;
+      try {
+        session = await NativeEngineSession.start(record.entryPath, options, backend);
+      } catch (err) {
+        // If ASIO cannot start (driver busy / occupied), immediately retry
+        // WASAPI so the user still gets sound without a browser gesture.
+        if (backend !== "asio") throw err;
+        log.warn("native asio failed, retrying wasapi", (err as Error).message);
+        session = await NativeEngineSession.start(
+          record.entryPath,
+          { ...options, device: cfg.output.device || "default" },
+          "wasapi",
+        );
+      }
+      if (token !== this.nativeBeginToken) {
+        await session.dispose();
+        return;
+      }
+      this.nativeWriteChain = Promise.resolve();
+      this.nativeRetry = 0;
       this.nativeSession = session;
+      session.on("log", (line) => log.warn("native stderr", line));
+      session.on("engineError", (err) => log.warn("native engine error", err.message));
       const event = session.configured;
+      log.info("native device", { name: event?.device?.name ?? event?.device?.id ?? "default", backend: event?.device?.backend ?? "wasapi", bufferFrames: event?.bufferFrames });
       const format: AudioFormat =
         event?.format ?? ({ sampleRate: rate, channels: msg.channels, bits, sampleFormat } as AudioFormat);
       this.nativeRate = format.sampleRate;
@@ -947,14 +1022,12 @@ export class PlayerService implements vscode.Disposable {
         this.emit();
         break;
       case "time":
-        if (!this.nativeSession) {
-          this.lastTimeAt = Date.now();
-          this.position = msg.position;
-          this.buffered = Math.max(this.position, msg.buffered ?? 0);
-          if (msg.duration) this.duration = msg.duration;
-          if (!this.playing && !this.loading) this.playing = true;
-          this.emit(false);
-        }
+        this.lastTimeAt = Date.now();
+        this.position = msg.position;
+        this.buffered = Math.max(this.position, msg.buffered ?? 0);
+        if (msg.duration) this.duration = msg.duration;
+        if (!this.playing && !this.loading) this.playing = true;
+        this.emit(false);
         break;
       case "ended":
         this.playing = false;
@@ -976,26 +1049,38 @@ export class PlayerService implements vscode.Disposable {
         this.error = msg.message;
         this.emit();
         break;
-      case "nativeFallbackLocal":
-        log.warn("native decode failed, falling back to WebAudio", msg.reason);
-        this.markNativeFailure(msg.reason);
+      case "nativeFallbackLocal": {
+        log.warn("native decode failed", msg.reason);
         await this.stopNative();
-        this.output = {
-          kind: "webaudio",
-          label: "WebAudio（兜底）",
-          detail: `原生路径不可用：${msg.reason}`,
-          unavailableReason: msg.reason,
-        };
         this.loading = false;
         this.playing = true;
-        this.emit();
-        if (!/采样率|sampleRate/i.test(msg.reason)) {
-          this.post({ type: "toast", kind: "error", message: `原生解码失败，已回退 WebAudio：${msg.reason}` });
+        if (this.currentSong && this.nativeRetry < 2) {
+          this.nativeRetry += 1;
+          log.info("native retry", { attempt: this.nativeRetry, reason: msg.reason });
+          void this.start(this.currentSong, this.position);
+          break;
         }
+        this.output = {
+          kind: "native",
+          label: "原生输出不可用",
+          detail: "原生路径失败：" + msg.reason,
+          unavailableReason: msg.reason,
+        };
+        this.error = msg.reason;
+        this.emit();
+        this.post({ type: "toast", kind: "error", message: "原生输出仍不可用：" + msg.reason });
         break;
-      case "nativeBegin":
-        await this.handleNativeBegin(msg);
+      }
+      case "nativeBegin": {
+        const token = ++this.nativeBeginToken;
+        this.nativeBeginChain = this.nativeBeginChain
+          .then(async () => {
+            if (token !== this.nativeBeginToken) return;
+            await this.handleNativeBegin(msg, token);
+          })
+          .catch((err) => log.warn("native begin failed", (err as Error).message));
         break;
+      }
       case "pcm": {
         const buffer = Buffer.from(msg.data, "base64");
         this.nativeWriteChain = this.nativeWriteChain
@@ -1006,13 +1091,43 @@ export class PlayerService implements vscode.Disposable {
             this.post({ type: "nativePcmAck", seq: msg.seq });
           })
           .catch((err) => {
-            this.error = (err as Error).message;
+            const message = (err as Error).message;
+            this.error = message;
+            log.warn("native pcm write failed", message);
+            this.post({ type: "nativeFallback", songId: this.nativeSongId ?? 0, reason: message });
+            this.emit();
+          });
+        break;
+      }
+      case "pcmInt": {
+        const buffer = Buffer.from(msg.data, "base64");
+        if (msg.seq <= 2 || msg.seq % 60 === 0) {
+          log.info("native pcm int", { seq: msg.seq, bytes: buffer.length, bits: msg.bits, frames: msg.frames });
+        }
+        this.nativeWriteChain = this.nativeWriteChain
+          .then(async () => {
+            const session = this.nativeSession;
+            if (!session) return;
+            await session.writePcmInt(buffer, msg.bits);
+            this.post({ type: "nativePcmAck", seq: msg.seq });
+          })
+          .catch((err) => {
+            const message = (err as Error).message;
+            this.error = message;
+            log.warn("native pcm write failed", message);
+            this.post({ type: "nativeFallback", songId: this.nativeSongId ?? 0, reason: message });
             this.emit();
           });
         break;
       }
       case "pcmDone":
         this.nativeExpectedFrames = msg.totalFrames || this.nativeExpectedFrames;
+        if (this.getConfig().output.bitPerfect) {
+          void this.nativeSession?.drain().catch((err) => {
+            this.error = (err as Error).message;
+            this.emit();
+          });
+        }
         break;
     }
   }

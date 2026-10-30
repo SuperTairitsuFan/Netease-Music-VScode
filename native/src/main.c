@@ -465,6 +465,13 @@ static int handle_control(Engine *engine, const char *json) {
   if (!json_string(json, "cmd", cmd, sizeof(cmd))) return 0;
   if (strcmp(cmd, "configure") == 0) return do_configure(engine, json);
   if (strcmp(cmd, "start") == 0) return do_start(engine);
+  if (strcmp(cmd, "drain") == 0) {
+    ring_finish(&engine->ring);
+    if (engine->thread_started) engine_join(engine);
+    if (engine->backend->drain) engine->backend->drain(engine->handle);
+    send_line("{\"event\":\"drained\"}");
+    return 0;
+  }
   if (strcmp(cmd, "pause") == 0) {
     engine->pump.paused = 1;
     if (engine->backend->pause) engine->backend->pause(engine->handle, 1);
@@ -565,6 +572,34 @@ static int serve(const NaoeBackend *backend) {
         break;
       }
       free(payload);
+    } else if (type == NAOE_FRAME_PCM_INT) {
+      if (!engine.started) {
+        send_error("NOT_STARTED", "整数 PCM 数据在 start 之前到达", NULL);
+        break;
+      }
+      if (!engine.configured || engine.format.channels <= 0 || !engine.backend->write_int) {
+        send_error("NOT_CONFIGURED", "当前后端不支持整数 PCM", NULL);
+        break;
+      }
+      int bps = engine.format.bits == 16 ? 2 : 4;
+      size_t frame_bytes = (size_t)bps * (size_t)engine.format.channels;
+      if (frame_bytes == 0 || length % frame_bytes != 0) {
+        send_error("INVALID_PCM", "整数 PCM 字节数不是帧大小的整数倍", NULL);
+        break;
+      }
+      unsigned char *payload = (unsigned char *)malloc(length ? length : 1);
+      if (!payload) break;
+      if (length && read_exact(payload, length) != 1) {
+        free(payload);
+        break;
+      }
+      int frames = (int)(length / frame_bytes);
+      int wrote = engine.backend->write_int(engine.handle, payload, frames, engine.format.bits);
+      free(payload);
+      if (wrote < 0) {
+        send_error("WRITE_FAILED", "WASAPI 整数写入失败", NULL);
+        break;
+      }
     } else if (type == NAOE_FRAME_END) {
       stream_ended = 1;
       break;

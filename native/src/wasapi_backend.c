@@ -7,6 +7,7 @@
  */
 #include "naoe.h"
 
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -18,6 +19,7 @@
 #include <windows.h>
 #include <mmdeviceapi.h>
 #include <audioclient.h>
+#include <avrt.h>
 #include <functiondiscoverykeys_devpkey.h>
 #include <ksmedia.h>
 #include <propsys.h>
@@ -33,6 +35,9 @@ typedef struct {
   int sample_rate;
   int exclusive;
   int started;
+  int mmcss_set;
+  HANDLE event;
+  HANDLE mmcss;
   volatile double volume;
   uint64_t written;
   unsigned char *convert;
@@ -253,7 +258,9 @@ static int wasapi_open(const NaoeConfig *cfg, NaoeFormat *actual, int *buffer_fr
     }
   }
 
-  DWORD flags = cfg->exclusive ? 0 : (AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY);
+  DWORD flags = cfg->exclusive
+                     ? AUDCLNT_STREAMFLAGS_EVENTCALLBACK
+                     : (AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY);
   REFERENCE_TIME duration = (REFERENCE_TIME)(cfg->buffer_ms > 0 ? cfg->buffer_ms : 10) * 10000;
   hr = IAudioClient_Initialize(client, cfg->exclusive ? AUDCLNT_SHAREMODE_EXCLUSIVE : AUDCLNT_SHAREMODE_SHARED,
                                flags, duration, cfg->exclusive ? duration : 0, &wfx.Format, NULL);
@@ -264,19 +271,23 @@ static int wasapi_open(const NaoeConfig *cfg, NaoeFormat *actual, int *buffer_fr
     goto fail;
   }
 
-  handle = (WasapiHandle *)calloc(1, sizeof(WasapiHandle));
-  if (!handle) {
-    snprintf(err, err_len, "内存不足");
-    goto fail;
-  }
   UINT32 buffer = 0;
   IAudioClient_GetBufferSize(client, &buffer);
+  handle = (WasapiHandle *)calloc(1, sizeof(WasapiHandle));
+  if (!handle) { snprintf(err, err_len, "内存不足"); goto fail; }
+  if (cfg->exclusive) {
+    handle->event = CreateEventW(NULL, FALSE, FALSE, NULL);
+    if (!handle->event || FAILED(IAudioClient_SetEventHandle(client, handle->event))) {
+      snprintf(err, err_len, "无法创建 WASAPI 事件");
+      goto fail;
+    }
+  }
+  handle->device = device;
+  handle->client = client;
   if (FAILED(IAudioClient_GetService(client, &IID_IAudioRenderClient, (void **)&handle->render))) {
     snprintf(err, err_len, "无法获取 WASAPI 渲染客户端");
     goto fail;
   }
-  handle->device = device;
-  handle->client = client;
   handle->format = wfx;
   handle->buffer_frames = (int)buffer;
   handle->channels = cfg->channels;
@@ -330,7 +341,7 @@ static int wasapi_write(void *opaque, const float *input, int frames) {
       double v = input[i] * gain;
       if (v > 1.0) v = 1.0;
       if (v < -1.0) v = -1.0;
-      dst[i] = (int16_t)(v * 32767.0);
+      dst[i] = (int16_t)llround(v * 32767.0);
     }
   } else if (handle->bits == 24) {
     int32_t *dst = (int32_t *)out;
@@ -338,7 +349,7 @@ static int wasapi_write(void *opaque, const float *input, int frames) {
       double v = input[i] * gain;
       if (v > 1.0) v = 1.0;
       if (v < -1.0) v = -1.0;
-      dst[i] = (int32_t)(v * 8388607.0) << 8;
+      dst[i] = (int32_t)llround(v * 8388607.0) << 8;
     }
   } else {
     int32_t *dst = (int32_t *)out;
@@ -346,10 +357,46 @@ static int wasapi_write(void *opaque, const float *input, int frames) {
       double v = input[i] * gain;
       if (v > 1.0) v = 1.0;
       if (v < -1.0) v = -1.0;
-      dst[i] = (int32_t)(v * 2147483647.0);
+      dst[i] = (int32_t)llround(v * 2147483647.0);
     }
   }
 
+  int written = 0;
+  while (written < frames) {
+    UINT32 padding = 0;
+    if (FAILED(IAudioClient_GetCurrentPadding(handle->client, &padding))) return -1;
+    UINT32 free_frames = (UINT32)handle->buffer_frames - padding;
+    if (free_frames == 0) {
+      if (handle->event) WaitForSingleObject(handle->event, 5); else naoe_sleep_ms(1);
+      continue;
+    }
+    UINT32 want = (UINT32)(frames - written);
+    if (want > free_frames) want = free_frames;
+    BYTE *buffer = NULL;
+    if (FAILED(IAudioRenderClient_GetBuffer(handle->render, want, &buffer))) return -1;
+    memcpy(buffer, out + (size_t)written * (size_t)channels * (size_t)bps, (size_t)want * (size_t)bps);
+    IAudioRenderClient_ReleaseBuffer(handle->render, want, 0);
+    written += (int)want;
+    handle->written += want;
+  }
+  return frames;
+}
+
+static int wasapi_write_int(void *opaque, const void *input, int frames, int bits) {
+  WasapiHandle *handle = (WasapiHandle *)opaque;
+  if (!handle || frames <= 0) return 0;
+  if (!handle->started) {
+    if (FAILED(IAudioClient_Start(handle->client))) return -1;
+    handle->started = 1;
+  }
+  if (!handle->mmcss_set) {
+    DWORD task = 0;
+    handle->mmcss = AvSetMmThreadCharacteristicsW(L"Pro Audio", &task);
+    if (handle->mmcss) AvSetMmThreadPriority(handle->mmcss, AVRT_PRIORITY_CRITICAL);
+    handle->mmcss_set = 1;
+  }
+  int bps = bits == 16 ? 2 : 4;
+  const unsigned char *src = (const unsigned char *)input;
   int written = 0;
   while (written < frames) {
     UINT32 padding = 0;
@@ -363,7 +410,8 @@ static int wasapi_write(void *opaque, const float *input, int frames) {
     if (want > free_frames) want = free_frames;
     BYTE *buffer = NULL;
     if (FAILED(IAudioRenderClient_GetBuffer(handle->render, want, &buffer))) return -1;
-    memcpy(buffer, out + (size_t)written * (size_t)channels * (size_t)bps, (size_t)want * (size_t)bps);
+    memcpy(buffer, src + (size_t)written * (size_t)handle->channels * (size_t)bps,
+           (size_t)want * (size_t)handle->channels * (size_t)bps);
     IAudioRenderClient_ReleaseBuffer(handle->render, want, 0);
     written += (int)want;
     handle->written += want;
@@ -429,6 +477,8 @@ static void wasapi_close(void *opaque) {
     IAudioClient_Stop(handle->client);
     IAudioClient_Release(handle->client);
   }
+  if (handle->mmcss) AvRevertMmThreadCharacteristics(handle->mmcss);
+  if (handle->event) CloseHandle(handle->event);
   if (handle->render) IAudioRenderClient_Release(handle->render);
   if (handle->device) IMMDevice_Release(handle->device);
   free(handle->convert);
@@ -439,6 +489,7 @@ const NaoeBackend naoe_wasapi_backend = {
     .name = "wasapi",
     .open = wasapi_open,
     .write = wasapi_write,
+    .write_int = wasapi_write_int,
     .position = wasapi_position,
     .pause = wasapi_pause,
     .volume = wasapi_volume,

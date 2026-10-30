@@ -2,10 +2,12 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { EventEmitter } from "node:events";
 import * as fs from "node:fs/promises";
 import type { AudioFormat, ComponentRecord } from "./components";
+import { log } from "../util/logger";
 
 export const FRAME_CONTROL = 1;
 export const FRAME_PCM = 2;
 export const FRAME_END = 3;
+export const FRAME_PCM_INT = 4;
 
 export interface EngineDevice {
   id: string;
@@ -66,7 +68,9 @@ export class NativeEngineSession extends EventEmitter {
     child.stdout.on("data", this.progressHandler);
     child.stderr.on("data", (data: Buffer) => {
       const line = data.toString("utf8").trim();
-      if (line) this.emit("log", line);
+      if (!line) return;
+      log.warn("native stderr", line);
+      this.emit("log", line);
     });
     child.on("exit", this.exitHandler);
     child.on("error", (err) => {
@@ -75,10 +79,11 @@ export class NativeEngineSession extends EventEmitter {
     });
   }
 
-  static async start(binary: string, options: EngineConfigureOptions): Promise<NativeEngineSession> {
+  static async start(binary: string, options: EngineConfigureOptions, backend?: "wasapi" | "asio"): Promise<NativeEngineSession> {
     const stat = await fs.stat(binary).catch(() => null);
     if (!stat?.isFile()) throw new Error(`原生引擎不存在：${binary}`);
-    const child = spawn(binary, ["--serve"], {
+    const args = backend ? ["--serve", "--backend", backend] : ["--serve"];
+    const child = spawn(binary, args, {
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
     }) as ChildProcessWithoutNullStreams;
@@ -196,6 +201,20 @@ export class NativeEngineSession extends EventEmitter {
     await this.writeWithBackpressure(buffer);
   }
 
+  async writePcmInt(buffer: Buffer, bits: number): Promise<void> {
+    if (this.closed) throw new Error("原生引擎已关闭");
+    const header = Buffer.alloc(5);
+    header.writeUInt8(FRAME_PCM_INT, 0);
+    header.writeUInt32LE(buffer.length, 1);
+    await this.writeWithBackpressure(header);
+    await this.writeWithBackpressure(buffer);
+    void bits;
+  }
+
+  async drain(): Promise<void> {
+    await this.request("drained", 30000, { cmd: "drain" });
+  }
+
   private async writeWithBackpressure(buffer: Buffer): Promise<void> {
     if (this.closed) throw new Error("原生引擎已关闭");
     if (this.child.stdin.write(buffer)) return;
@@ -276,6 +295,14 @@ export class NativeEngineSession extends EventEmitter {
       this.child.kill();
     } catch {
       /* ignore */
+    }
+    // Wait for the OS process to actually die so the audio driver (WASAPI
+    // exclusive / ASIO) is released before the next session starts.
+    if (this.child.exitCode === null) {
+      await Promise.race([
+        new Promise<void>((resolve) => this.child.once("exit", () => resolve())),
+        new Promise<void>((resolve) => setTimeout(resolve, 3000)),
+      ]);
     }
     this.removeAllListeners();
   }

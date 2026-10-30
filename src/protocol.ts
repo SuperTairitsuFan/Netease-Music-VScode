@@ -78,6 +78,8 @@ export interface SettingsView {
   bitDepth: string;
   sampleFormat: string;
   exclusive: boolean;
+  bitPerfect: boolean;
+  nativeBackend: "wasapi" | "asio";
   bufferMs: number;
   volume: number;
   mode: string;
@@ -319,6 +321,10 @@ export interface LoadRequest {
   gain?: number;
   trialEnd?: number;
   sourceSampleRate?: number;
+  /** source bit depth when known (16/24/32) */
+  sourceBits?: number;
+  /** use integer PCM frames (bit-perfect path) */
+  integerPcm?: boolean;
 }
 
 export type HostMessage =
@@ -456,8 +462,9 @@ export type WebviewMessage =
   | { type: "time"; position: number; duration: number; buffered?: number }
   | { type: "ended" }
   | { type: "loadError"; message: string }
-  | { type: "nativeBegin"; songId: number; sampleRate: number; channels: number; length: number }
+  | { type: "nativeBegin"; songId: number; sampleRate: number; channels: number; length: number; bits: number; integer?: boolean }
   | { type: "pcm"; seq: number; data: string; frames: number }
+  | { type: "pcmInt"; seq: number; data: string; frames: number; bits: number }
   | { type: "pcmDone"; songId: number; totalFrames: number }
   | { type: "decodeError"; message: string }
   | { type: "nativeFallbackLocal"; reason: string };

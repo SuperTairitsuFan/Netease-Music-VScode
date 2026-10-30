@@ -1,5 +1,74 @@
 # Changelog
 
+## 0.3.36
+
+- ASIO 暂停改为软暂停（驱动不停、输出静音、清空环形缓冲），避免暂停时缓冲写满导致 PCM 超时。
+- 恢复播放补发 control:play，Webview 原生发送循环继续。
+- 原生失败不再回退 WebAudio：自动重试原生（最多 2 次），仍失败则明确报错，保持固定后端。
+
+## 0.3.35
+
+- 切歌时 nativeBegin 串行化并丢弃过期请求，避免多个 ASIO 会话抢设备导致 PCM 超时。
+- ASIO 启动失败自动立刻改用 WASAPI 原生后端，不再等待超时后回退到会被浏览器拦截的 WebAudio。
+- native pcm int 日志限流，减少终端刷屏与开销。
+
+## 0.3.34
+
+- 修复 ASIO 回调按声道连续取交织样本的错误：改为按帧取、逐声道分发。此问题是“声音变粗/怪声/规律底噪”的根因。
+- 原生 stderr（ASIO 采样率/时钟/首缓冲/underrun）直接写入日志终端。
+
+## 0.3.33
+
+- ASIO 增加诊断输出：驱动实际采样率、时钟源、首个缓冲区的十六进制采样值（走日志终端 native stderr）。
+- 确认 PCM/DSD IO 格式协商用 PCM。
+
+## 0.3.32
+
+- 原生会话 dispose 等待子进程真正退出，避免新旧 ASIO 会话抢设备。
+- ASIOStart 失败自动重试；PCM 写入失败立刻回退并输出真实原因（不再一律显示“数据写入超时”）。
+- 原生 stderr/engineError 接入日志终端。
+
+## 0.3.31
+
+- 修复 Bit-perfect 请求未携带 integerPcm/sourceBits 的问题：ASIO 现在真正走 32-bit 整数 PCM_INT，与后端 s32le 一致。
+- ASIO outputReady 改由 STA 线程调用，避免跨线程 COM 调用污染音频。
+
+## 0.3.30
+
+- ASIO COM 迁移到独立 STA 消息泵线程，回调不再因引擎线程阻塞 stdin 而停摆。
+- 按驱动报告的真实采样类型（Int16/Int24/Int32/Float32）写入，消除类型不匹配杂音。
+- ASIOStart 延迟到首批 PCM 到达，欠载时输出上一采样而非零值，减少开头爆音。
+- ASIO 缓冲优先使用 2×preferred，降低 underrun。
+
+## 0.3.29
+
+- 新增 ASIO 原生后端（COM IASIO，STA 线程，CLSID 即接口 IID）。
+- ASIO 使用 ASIOSTInt32LSB 直通：16/24 位源经整数扩位，不经过 float。
+- 设置新增「原生后端：WASAPI / ASIO」；Bit-perfect 推荐 ASIO。
+
+## 0.3.28
+
+- WASAPI Exclusive 改为事件驱动（SetEventHandle/WaitForSingleObject），减少轮询 underrun。
+- 共享模式保持轮询，避免 AUTOCONVERT 与事件回调冲突。
+- 整数 PCM 直写路径加入 MMCSS Pro Audio。
+
+## 0.3.27
+
+- 整数 PCM 直写路径也设置 MMCSS Pro Audio 线程优先级。
+- 新增 native pcm int 日志，便于确认整数帧是否到达宿主。
+
+## 0.3.25
+
+- 实现严格 Bit-perfect 整数 PCM 链路：Webview 输出 s16/s24/s32，原生引擎直接写 WASAPI，不经 float 转换。
+- 原生 PCM_INT 帧、WASAPI 整数写入、drain 完成信号与播放时间进度。
+- Bit-perfect 强制 Exclusive、源采样率/位深、100% 音量。
+
+## 0.3.24
+
+- 新增严格 Bit-perfect 开关：强制原生 Exclusive、源采样率/位深、固定 100% 音量、不做增益。
+- 音源位深推断（FLAC/无损按码率选择 16/24-bit），原生转换使用四舍五入。
+- 原生 MMCSS 线程与共享 16-bit 兼容路径保留。
+
 ## 0.3.22
 
 - auto 输出模式改为优先 WebAudio；仅显式选择 native 才使用原生引擎。

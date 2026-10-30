@@ -254,11 +254,8 @@ export class App implements vscode.Disposable {
       msg.type === "nativePcmAck" ||
       msg.type === "nativeFallback"
     ) {
-      if (this.audioOwner === "main" && this.mainPanel.isReady && msg.type === "control") {
-        this.mainPanel.post(msg);
-      } else {
-        this.sidebar.post(msg);
-      }
+      const target = this.audioOwner === "main" && this.mainPanel.isReady ? this.mainPanel : this.sidebar;
+      target.post(msg);
       return;
     }
     if (msg.type === "playerError" || msg.type === "toast") {
@@ -385,6 +382,8 @@ export class App implements vscode.Disposable {
       bitDepth: cfg.output.bitDepth,
       sampleFormat: cfg.output.sampleFormat,
       exclusive: cfg.output.exclusive,
+      bitPerfect: cfg.output.bitPerfect,
+      nativeBackend: cfg.output.backend,
       bufferMs: cfg.output.bufferMs,
       volume: Math.round(cfg.playback.volume),
       mode: cfg.playback.mode,

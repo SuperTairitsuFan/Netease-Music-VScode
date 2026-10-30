@@ -15,6 +15,8 @@ export interface MusicConfig {
     sampleFormat: string;
     exclusive: boolean;
     bufferMs: number;
+    bitPerfect: boolean;
+    backend: "wasapi" | "asio";
   };
   quality: Quality;
   download: {
@@ -151,6 +153,8 @@ export function getConfig(): MusicConfig {
       sampleFormat: c.get<string>("output.sampleFormat") ?? "auto",
       exclusive: c.get<boolean>("output.exclusive") ?? true,
       bufferMs: c.get<number>("output.bufferMs") ?? 10,
+      bitPerfect: c.get<boolean>("output.bitPerfect") ?? false,
+      backend: c.get<string>("output.backend") === "asio" ? "asio" : "wasapi",
     },
     quality: normalizeQuality(c.get<string>("quality")),
     download: {

@@ -13,6 +13,7 @@
 
 extern const NaoeBackend naoe_alsa_backend;
 extern const NaoeBackend naoe_wasapi_backend;
+extern const NaoeBackend naoe_asio_backend;
 extern const NaoeBackend naoe_null_backend;
 
 void naoe_json_escape(const char *input, char *output, size_t output_len) {
@@ -90,6 +91,10 @@ int naoe_backend_select(const char *name, const NaoeBackend **out) {
   }
   if (strcmp(name, "wasapi") == 0) {
     *out = &naoe_wasapi_backend;
+    return 0;
+  }
+  if (strcmp(name, "asio") == 0) {
+    *out = &naoe_asio_backend;
     return 0;
   }
   return -1;

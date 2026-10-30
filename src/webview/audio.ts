@@ -29,6 +29,7 @@ export class AudioEngine {
   private seq = 0;
   private readonly ackWaiters = new Map<number, () => void>();
   private nativeAbort = false;
+  private nativePaused = false;
   private nativeWaiter?: {
     songId: number;
     resolve: () => void;
@@ -68,14 +69,17 @@ export class AudioEngine {
   control(action: "play" | "pause" | "stop" | "seek" | "volume" | "rate", value?: number): void {
     switch (action) {
       case "pause":
+        this.nativePaused = true;
         this.audio.pause();
         break;
       case "play":
+        this.nativePaused = false;
         void this.audio.play().catch((err: Error) => {
           this.send({ type: "loadError", message: `无法恢复播放：${err.message}` });
         });
         break;
       case "stop":
+        this.nativePaused = false;
         this.stopInternal();
         break;
       case "seek":
@@ -201,42 +205,80 @@ export class AudioEngine {
         : decoded.length;
       const totalFrames = end - start;
       if (totalFrames <= 0) throw new Error("音频总长度为零");
+      const integer = Boolean(request.integerPcm);
+      const sourceBits = Math.max(16, Math.min(32, request.sourceBits ?? 16));
       this.send({
         type: "nativeBegin",
         songId: request.song.id,
         sampleRate: decoded.sampleRate,
         channels: decoded.numberOfChannels,
         length: totalFrames,
+        bits: sourceBits,
+        integer,
       });
       await this.waitNativeReady(request.song.id, 3000);
 
       const channels = decoded.numberOfChannels;
       let seq = 0;
       for (let offset = start; offset < end; offset += this.chunkFrames) {
+        while (this.nativePaused && !this.nativeAbort && this.current === request) {
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        }
         if (this.nativeAbort || this.current !== request) return;
         const frames = Math.min(this.chunkFrames, end - offset);
-        const interleaved = new Float32Array(frames * channels);
-        for (let c = 0; c < channels; c += 1) {
-          const source = decoded.getChannelData(c);
-          for (let i = 0; i < frames; i += 1) {
-            interleaved[i * channels + c] = source[offset + i] ?? 0;
+        if (integer) {
+          const bytes = sourceBits === 16 ? 2 : 4;
+          const ints = sourceBits === 16 ? new Int16Array(frames * channels) : new Int32Array(frames * channels);
+          for (let c = 0; c < channels; c += 1) {
+            const source = decoded.getChannelData(c);
+            for (let i = 0; i < frames; i += 1) {
+              const v = clamp(source[offset + i] ?? 0, -1, 1);
+              if (sourceBits === 16) {
+                (ints as Int16Array)[i * channels + c] = Math.round(v * 32767);
+              } else if (sourceBits === 24) {
+                (ints as Int32Array)[i * channels + c] = Math.round(v * 8388607) << 8;
+              } else {
+                (ints as Int32Array)[i * channels + c] = Math.round(v * 2147483647);
+              }
+            }
           }
+          seq += 1;
+          this.send({
+            type: "pcmInt",
+            seq,
+            data: toBase64(new Uint8Array(ints.buffer)),
+            frames,
+            bits: sourceBits,
+          });
+          const position = request.position + (offset - start) / decoded.sampleRate;
+          this.send({ type: "time", position, duration: request.duration, buffered: position });
+          await this.waitAck(seq, 2500);
+        } else {
+          const interleaved = new Float32Array(frames * channels);
+          for (let c = 0; c < channels; c += 1) {
+            const source = decoded.getChannelData(c);
+            for (let i = 0; i < frames; i += 1) {
+              interleaved[i * channels + c] = source[offset + i] ?? 0;
+            }
+          }
+          seq += 1;
+          this.send({
+            type: "pcm",
+            seq,
+            data: toBase64(new Uint8Array(interleaved.buffer)),
+            frames,
+          });
+          await this.waitAck(seq, 2500);
         }
-        seq += 1;
-        this.send({
-          type: "pcm",
-          seq,
-          data: toBase64(new Uint8Array(interleaved.buffer)),
-          frames,
-        });
-        await this.waitAck(seq, 2500);
       }
       this.send({ type: "pcmDone", songId: request.song.id, totalFrames });
     } catch (err) {
       if (this.nativeAbort || this.current !== request) return;
       const message = (err as Error).message;
       this.send({ type: "nativeFallbackLocal", reason: message });
-      this.playElement({ ...request, native: false, url: request.localUri ?? request.url });
+      if (!request.native) {
+        this.playElement({ ...request, native: false, url: request.localUri ?? request.url });
+      }
     }
   }
 

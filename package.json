@@ -2,7 +2,7 @@
   "name": "netease-music",
   "displayName": "网易云音乐",
   "description": "网易云音乐 for VS Code：EAPI 直连、PC 风侧边栏、歌单/歌手/搜索/评论、封面下载与原生音频输出。",
-  "version": "0.3.22",
+  "version": "0.3.36",
   "publisher": "AICis",
   "license": "MIT",
   "engines": {
@@ -627,6 +627,24 @@
           "type": "string",
           "default": "{name} - {artist}",
           "markdownDescription": "封面文件名模板，可用 `{name}`（曲名）与 `{artist}`（歌手）。"
+        },
+        "neteaseMusic.output.bitPerfect": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "严格 bit-perfect：强制原生 Exclusive，按音源采样率/位深输出，音量固定 100%，不做重采样与增益。原生引擎不可用时明确报错。"
+        },
+        "neteaseMusic.output.backend": {
+          "type": "string",
+          "enum": [
+            "wasapi",
+            "asio"
+          ],
+          "enumDescriptions": [
+            "Windows WASAPI（事件驱动/独占）",
+            "ASIO 直通（需要 DAC 厂商 ASIO 驱动）"
+          ],
+          "default": "wasapi",
+          "markdownDescription": "原生引擎后端。ASIO 绕过 Windows 混音器，适合 USB DAC 高采样率。"
         }
       }
     }
