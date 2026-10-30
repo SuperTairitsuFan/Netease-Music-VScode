@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.12
+
+- 使用网易云音乐官方红色图标作为扩展市场图标。
+- Activity Bar 图标改为 TouchFish 风格的深灰圆角网易云图标。
+- README 增加开发者个人使用界面截图：歌曲详情、推荐、歌手专辑。
+
 ## 0.3.11
 
 - Marketplace 发布修复：移除包内中文路径文档，Publisher 调整为 AICis。
