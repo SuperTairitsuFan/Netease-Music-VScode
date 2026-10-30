@@ -710,7 +710,12 @@ function renderBottomPlayer(): void {
   }
   box.dataset.track = String(track.id);
   box.classList.remove("hidden");
-  box.innerHTML = `<div class="bp-left" data-act="openSongDetail" data-id="${track.id}" title="打开歌曲详情"><img src="${esc(cover(track.album?.picUrl, 60))}" alt=""><div class="bp-meta"><div class="bp-title">${esc(track.name)}</div><div class="bp-sub">${esc(track.artists.map((artist) => artist.name).join(" / "))}</div></div></div>
+  const artistText =
+    track.artists
+      .map((artist) => artist.name)
+      .filter((name) => name && !/\{(?:artist|name|album)\}/i.test(name))
+      .join(" / ") || "本地音乐";
+  box.innerHTML = `<div class="bp-left" data-act="openSongDetail" data-id="${track.id}" title="打开歌曲详情"><img src="${esc(cover(track.album?.picUrl, 60))}" alt=""><div class="bp-meta"><div class="bp-title">${esc(track.name)}</div><div class="bp-sub">${esc(artistText)}</div></div></div>
     <div class="bp-controls"><button class="icon-btn bp-like" data-act="likeTrack" data-id="${track.id}" title="喜欢"></button><button class="icon-btn bp-favorite" data-act="openFavorite" data-id="${track.id}" title="收藏到歌单">${icon("star", 14)}</button><button class="icon-btn bp-mode" data-act="cycleMode"></button><button class="icon-btn" data-act="previous" title="上一首">${icon("prev", 14)}</button><button class="icon-btn" data-act="playPause" title="播放/暂停">${icon(player.playing ? "pause" : "play", 14)}</button><button class="icon-btn" data-act="next" title="下一首">${icon("next", 14)}</button></div>
     <div class="bp-seek-wrap"><span class="bp-time" id="bp-cur">${fmtTime(player.position)}</span><div class="bp-range" id="bp-range"><div class="bp-buffered" id="bp-buffered"></div><div class="bp-played" id="bp-played"></div><input id="bp-seek" type="range" min="0" max="${Math.max(1, player.duration)}" value="${Math.min(player.position, player.duration || player.position)}" step="0.5" aria-label="播放进度" /></div><span class="bp-time" id="bp-dur">${fmtTime(player.duration)}</span></div>`;
   updateModeButton(box);

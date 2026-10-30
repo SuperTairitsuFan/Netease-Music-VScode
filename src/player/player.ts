@@ -581,6 +581,7 @@ export class PlayerService implements vscode.Disposable {
   }
 
   private async start(song: Track, position: number, keepStallRetry = false): Promise<void> {
+    log.info("player start", { id: song.id, name: song.name, local: Boolean(song.localPath), output: this.output.kind, position });
     if (this.output.kind === "none") throw new Error(this.output.detail);
     const token = ++this.playToken;
     await this.stopNative();

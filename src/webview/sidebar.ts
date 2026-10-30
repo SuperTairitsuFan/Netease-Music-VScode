@@ -49,9 +49,22 @@ function boot(): void {
       <button class="icon-btn quality-btn" data-act="quality" title="音质调节">${icon("music", 14)}<span id="side-quality">极高</span></button>
       <button class="icon-btn" data-act="sleepTimer" title="定时关闭">${icon("clock", 14)}</button>
       <button class="icon-btn rate-btn" data-act="playbackRate" title="播放速度">1.0x</button>
+      <button class="icon-btn" data-act="volumePopup" title="音量">${icon("volume", 14)}</button>
+    </div>
+    <div class="volume-pop" id="volume-pop" hidden>
+      <input id="volume-range" type="range" min="0" max="100" step="1" value="80" />
+      <span id="volume-label">80%</span>
     </div>
   </div>`;
   document.addEventListener("click", onClick, true);
+  document.addEventListener("input", (event) => {
+    const target = event.target as HTMLInputElement | null;
+    if (target?.id !== "volume-range") return;
+    const value = Number(target.value);
+    const label = qs<HTMLElement>("#volume-label");
+    if (label) label.textContent = `${value}%`;
+    send("setVolume", { value });
+  });
   vscode.postMessage({ type: "ready" });
 }
 
@@ -126,6 +139,11 @@ function onClick(event: Event): void {
     case "playbackRate":
       send("playbackRate");
       break;
+    case "volumePopup": {
+      const pop = qs<HTMLElement>("#volume-pop");
+      if (pop) pop.hidden = !pop.hidden;
+      break;
+    }
     case "openMyProfile":
       send("openMyProfile");
       break;
@@ -275,6 +293,10 @@ window.addEventListener("message", (event: MessageEvent<HostMessage>) => {
           };
           quality.textContent = labels[player.quality] ?? player.quality;
         }
+        const volume = qs<HTMLInputElement>("#volume-range");
+        const volumeLabel = qs<HTMLElement>("#volume-label");
+        if (volume) volume.value = String(Math.round((player.volume ?? 0.8) * 100));
+        if (volumeLabel) volumeLabel.textContent = `${Math.round((player.volume ?? 0.8) * 100)}%`;
       }
       break;
     case "account":

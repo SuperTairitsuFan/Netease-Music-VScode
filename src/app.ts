@@ -268,6 +268,7 @@ export class App implements vscode.Disposable {
   }
 
   async handleCommand(cmd: string, payload?: unknown, surface: WebviewSurface = "main"): Promise<void> {
+    if (cmd !== "ready") log.info("command", { cmd, surface, id: (payload as any)?.id ?? (payload as any)?.track?.id });
     try {
       if (cmd === "ready") {
         await this.sendInit(surface);
@@ -595,6 +596,9 @@ export class App implements vscode.Disposable {
       case "playPause":
         await this.ensureAudioHost();
         await this.player.toggle();
+        break;
+      case "setVolume":
+        await this.player.setVolume(Math.max(0, Math.min(100, Number(payload.value ?? 80))) / 100);
         break;
       case "next":
         await this.player.next(true);
@@ -2013,12 +2017,16 @@ export class App implements vscode.Disposable {
         const match = stem.match(/^(.+?)\s+-\s+(.+)$/);
         const task = downloaded.get(path.resolve(full));
         const songId = task?.songId;
+        const clean = (value: string): string =>
+          value.replace(/\{(?:artist|name|album|id|quality|ext)\}/gi, "").trim();
+        const rawName = match ? match[2] : task?.name ?? stem;
+        const rawArtist = match ? match[1] : task?.artists ?? "";
         results.push({
           path: full,
           id: songId ?? -Math.abs(hashString(full)),
           songId,
-          name: match ? match[2] : task?.name ?? stem,
-          artists: match ? match[1] : task?.artists ?? "",
+          name: clean(rawName) || stem,
+          artists: clean(rawArtist) || "本地音乐",
           album: path.basename(path.dirname(full)),
           size: stat.size,
           ext,

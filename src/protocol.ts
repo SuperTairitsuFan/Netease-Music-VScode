@@ -374,6 +374,7 @@ export type WebviewCommand =
   | "createPlaylist"
   | "deletePlaylist"
   | "movePlaylist"
+  | "setVolume"
   | "openMain"
   | "openNow"
   | "openQueue"
