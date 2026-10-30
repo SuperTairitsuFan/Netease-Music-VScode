@@ -800,15 +800,21 @@ export class PlayerService implements vscode.Disposable {
       return;
     }
     const rate = msg.sampleRate;
-    const bits = cfg.output.bitDepth === "auto" ? 32 : Number(cfg.output.bitDepth);
-    const sampleFormat = cfg.output.sampleFormat === "auto" ? "f32le" : cfg.output.sampleFormat;
+    const exclusive = cfg.output.exclusive || rate > 48000;
+    // WASAPI shared mode often rejects 32-bit WAVEFORMATEXTENSIBLE even when
+    // the device advertises it; 16-bit is universally accepted by the mixer.
+    const bits = exclusive
+      ? (cfg.output.bitDepth === "auto" ? 32 : Number(cfg.output.bitDepth))
+      : 16;
+    const sampleFormat = exclusive
+      ? (cfg.output.sampleFormat === "auto" ? "f32le" : cfg.output.sampleFormat)
+      : "s16le";
     await this.stopNative();
     this.nativeSongId = msg.songId;
     this.nativeReceivedFrames = 0;
     this.nativeExpectedFrames = msg.length;
     this.nativeStartPosition = this.position;
     this.finishedNative = false;
-    const exclusive = cfg.output.exclusive || rate > 48000;
     log.info("native configure", { rate, bits, sampleFormat, exclusive, bufferMs: Math.max(40, cfg.output.bufferMs) });
     try {
       const session = await NativeEngineSession.start(record.entryPath, {

@@ -84,13 +84,13 @@ export class NativeEngineSession extends EventEmitter {
     }) as ChildProcessWithoutNullStreams;
     const session = new NativeEngineSession(child, binary);
     try {
-      await session.waitFor("ready", 8000);
+      await session.waitFor("ready", 3000);
       session.ready = true;
-      const configured = await session.request("configured", 10000, {
+      const configured = await session.request("configured", 3000, {
         cmd: "configure",
         ...options,
       });
-      await session.request("started", 10000, { cmd: "start" });
+      await session.request("started", 3000, { cmd: "start" });
       session.configured = {
         device: configured.device,
         format: configured.format,

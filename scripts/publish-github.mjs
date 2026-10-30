@@ -51,6 +51,7 @@ const IGNORED_DIRS = new Set([
   "components",
   "components-zip",
   ".git",
+  "tools",
 ]);
 const IGNORED_FILES = new Set(["package-lock.json.bak"]);
 const IGNORED_EXT = new Set([".vsix", ".map", ".tsbuildinfo"]);

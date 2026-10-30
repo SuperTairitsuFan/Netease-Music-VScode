@@ -44,7 +44,7 @@ const TARGETS = {
     arch: "x64",
     backend: "wasapi",
     entry: "native-audio-output.exe",
-    libs: ["-lole32", "-luuid", "-loleaut32"],
+    libs: ["-lole32", "-luuid", "-loleaut32", "-lavrt"],
     cflags: ["-I", path.join(root, "native/src")],
   },
 };

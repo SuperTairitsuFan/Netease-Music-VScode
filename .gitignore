@@ -9,3 +9,4 @@ components-zip/
 *.vsix
 *.map
 *.tsbuildinfo
+tools/

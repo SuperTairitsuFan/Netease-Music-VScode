@@ -208,7 +208,7 @@ export class AudioEngine {
         channels: decoded.numberOfChannels,
         length: totalFrames,
       });
-      await this.waitNativeReady(request.song.id, 15000);
+      await this.waitNativeReady(request.song.id, 3000);
 
       const channels = decoded.numberOfChannels;
       let seq = 0;
@@ -229,7 +229,7 @@ export class AudioEngine {
           data: toBase64(new Uint8Array(interleaved.buffer)),
           frames,
         });
-        await this.waitAck(seq, 6000);
+        await this.waitAck(seq, 2500);
       }
       this.send({ type: "pcmDone", songId: request.song.id, totalFrames });
     } catch (err) {

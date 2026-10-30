@@ -9,6 +9,7 @@
 #include <fcntl.h>
 #include <io.h>
 #include <windows.h>
+#include <avrt.h>
 #else
 #include <pthread.h>
 #endif
@@ -268,6 +269,11 @@ static void *pump_main(void *arg)
   uint64_t written = 0;
   uint64_t last_report = naoe_now_ms();
   int failed = 0;
+#ifdef _WIN32
+  DWORD mmcss_task = 0;
+  HANDLE mmcss = AvSetMmThreadCharacteristicsW(L"Pro Audio", &mmcss_task);
+  if (mmcss) AvSetMmThreadPriority(mmcss, AVRT_PRIORITY_CRITICAL);
+#endif
 
   while (!pump->finished) {
     if (pump->paused) {
@@ -310,6 +316,7 @@ static void *pump_main(void *arg)
   }
   free(buffer);
 #ifdef _WIN32
+  if (mmcss) AvRevertMmThreadCharacteristics(mmcss);
   return 0;
 #else
   return NULL;

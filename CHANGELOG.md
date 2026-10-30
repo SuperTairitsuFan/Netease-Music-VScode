@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.21
+
+- 原生音频 pump 线程加入 Windows MMCSS「Pro Audio」优先级，减少 WASAPI 爆音/撕裂。
+- 共享模式输出强制 16-bit，避免部分 USB DAC 的 32-bit shared 初始化失败。
+- >48kHz 继续强制 Exclusive；缓存/重采样策略不变。
+
 ## 0.3.20
 
 - 高于 48kHz 的原生输出自动使用 WASAPI Exclusive，避免 shared mode 的 0x8889000a 初始化失败。
