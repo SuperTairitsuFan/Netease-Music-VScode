@@ -1,3 +1,7 @@
+## 原生音频技术文档
+
+- [音频引擎架构、WASAPI 独占、ASIO、Bit-perfect、流式解码与故障排查](AUDIO_ENGINE.md)
+
 # 网易云音乐 for VS Code
 
 在 VS Code 里运行一个**桌面客户端形态**的网易云音乐：侧边栏管理歌单，编辑器区浏览歌曲、歌手、专辑、评论，底部状态栏控制播放。数据通过 EAPI（桌面客户端协议）获取，可选 Windows WASAPI / Linux ALSA 原生音频输出。
