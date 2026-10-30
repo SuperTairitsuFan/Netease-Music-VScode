@@ -37,6 +37,9 @@ export class PlayerService implements vscode.Disposable {
   private playing = false;
   private loading = false;
   private mediaLoaded = false;
+  private lastTimeAt = 0;
+  private stallTimer?: NodeJS.Timeout;
+  private stallRetried = false;
   private position = 0;
   private duration = 0;
   private buffered = 0;
@@ -325,6 +328,7 @@ export class PlayerService implements vscode.Disposable {
     this.loading = false;
     this.playing = true;
     this.mediaLoaded = true;
+    this.armStallWatch();
     this.error = null;
     this.actualQuality = "local";
     this.trialEnd = 0;
@@ -445,6 +449,19 @@ export class PlayerService implements vscode.Disposable {
     this.emit();
   }
 
+  private armStallWatch(): void {
+    if (this.stallTimer) clearTimeout(this.stallTimer);
+    const token = this.playToken;
+    this.stallTimer = setTimeout(() => {
+      if (token !== this.playToken || !this.playing || !this.mediaLoaded || !this.currentSong) return;
+      if (Date.now() - this.lastTimeAt < 5500) return;
+      if (this.stallRetried) return;
+      this.stallRetried = true;
+      log.warn("playback stalled before first time update, retrying once", String(this.currentSong.id));
+      void this.start(this.currentSong, this.position, true).catch((err) => log.warn("stalled playback retry failed", String(err)));
+    }, 6500);
+  }
+
   async setVolume(volume: number): Promise<void> {
     this.volume = Math.max(0, Math.min(1, volume));
     this.post({ type: "control", action: "volume", value: this.volume });
@@ -563,7 +580,7 @@ export class PlayerService implements vscode.Disposable {
     await this.start(song, position);
   }
 
-  private async start(song: Track, position: number): Promise<void> {
+  private async start(song: Track, position: number, keepStallRetry = false): Promise<void> {
     if (this.output.kind === "none") throw new Error(this.output.detail);
     const token = ++this.playToken;
     await this.stopNative();
@@ -573,6 +590,8 @@ export class PlayerService implements vscode.Disposable {
     this.loading = true;
     this.mediaLoaded = false;
     this.playing = false;
+    this.lastTimeAt = Date.now();
+    if (!keepStallRetry) this.stallRetried = false;
     this.error = null;
     this.preparing = 0;
     this.actualQuality = "";
@@ -589,6 +608,7 @@ export class PlayerService implements vscode.Disposable {
       this.loading = false;
       this.playing = true;
       this.mediaLoaded = true;
+    this.armStallWatch();
       this.post({
         type: "load",
         request: {
@@ -636,6 +656,7 @@ export class PlayerService implements vscode.Disposable {
             sourceSampleRate: resolved.sampleRate,
           };
           this.mediaLoaded = true;
+    this.armStallWatch();
           this.post({ type: "load", request });
           this.loading = false;
           this.emit();
@@ -666,6 +687,7 @@ export class PlayerService implements vscode.Disposable {
         sourceSampleRate: resolved.sampleRate,
       };
       this.mediaLoaded = true;
+    this.armStallWatch();
           this.post({ type: "load", request });
       this.loading = false;
       this.output = {
@@ -893,6 +915,7 @@ export class PlayerService implements vscode.Disposable {
         break;
       case "time":
         if (!this.nativeSession) {
+          this.lastTimeAt = Date.now();
           this.position = msg.position;
           this.buffered = Math.max(this.position, msg.buffered ?? 0);
           if (msg.duration) this.duration = msg.duration;

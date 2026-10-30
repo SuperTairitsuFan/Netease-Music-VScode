@@ -155,7 +155,21 @@ export class AudioEngine {
     else this.audio.addEventListener("loadedmetadata", apply, { once: true });
     void this.audio.play().catch((err: Error) => {
       if (err.name === "NotAllowedError") {
-        this.send({ type: "loadError", message: "浏览器阻止了自动播放，请点击播放按钮继续" });
+        // A webview can start muted without a user gesture. Once playback has
+        // begun, unmute; this makes the first song from the editor work even
+        // when the audio host sidebar was not clicked.
+        this.audio.muted = true;
+        void this.audio
+          .play()
+          .then(() => {
+            setTimeout(() => {
+              this.audio.muted = false;
+              this.audio.volume = clamp(request.volume, 0, 1);
+            }, 180);
+          })
+          .catch((next: Error) => {
+            this.send({ type: "loadError", message: `浏览器阻止了自动播放，请点击播放按钮继续（${next.message}）` });
+          });
       } else {
         this.send({ type: "loadError", message: `无法开始播放：${err.message}` });
       }

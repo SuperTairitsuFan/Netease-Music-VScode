@@ -244,6 +244,8 @@ export class App implements vscode.Disposable {
       return;
     }
     if (msg.type === "playerError" || msg.type === "toast") {
+      if (msg.type === "playerError") log.warn("player error", msg.message);
+      else if (msg.kind === "error") log.warn("player toast", msg.message);
       this.broadcast(msg);
       return;
     }
