@@ -2,8 +2,8 @@
   "name": "netease-music",
   "displayName": "网易云音乐",
   "description": "网易云音乐 for VS Code：EAPI 直连、PC 风侧边栏、歌单/歌手/搜索/评论、封面下载与原生音频输出。",
-  "version": "0.3.10",
-  "publisher": "Netease-Music-VScode",
+  "version": "0.3.11",
+  "publisher": "AICis",
   "license": "MIT",
   "engines": {
     "vscode": "^1.85.0"

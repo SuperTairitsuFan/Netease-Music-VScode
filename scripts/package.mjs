@@ -38,7 +38,7 @@ function packageTarget(target, options) {
   fs.mkdirSync(staging, { recursive: true });
   fs.mkdirSync(outDir, { recursive: true });
 
-  for (const entry of ["package.json", "README.md", "CHANGELOG.md", "LICENSE", "dist", "media", "docs"]) {
+  for (const entry of ["package.json", "README.md", "CHANGELOG.md", "LICENSE", "dist", "media"]) {
     copy(entry, staging);
   }
   const componentDir = path.join("components", target);

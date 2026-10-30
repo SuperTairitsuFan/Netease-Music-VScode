@@ -59,12 +59,12 @@
 
 ### VS Code 插件市场
 
-在 VS Code 扩展面板搜索 **网易云音乐** 或 **Netease Music**，选择发布者为 `Netease-Music-VScode` 的扩展安装。
+在 VS Code 扩展面板搜索 **网易云音乐** 或 **Netease Music**，选择发布者为 `AICis` 的扩展安装。
 
 也可以直接打开：
 
 ```text
-vscode:extension/Netease-Music-VScode.netease-music
+vscode:extension/AICis.netease-music
 ```
 
 ### VSIX
@@ -72,7 +72,7 @@ vscode:extension/Netease-Music-VScode.netease-music
 从 [GitHub Releases](https://github.com/SuperTairitsuFan/Netease-Music-VScode/releases) 下载对应平台的 `.vsix`，然后：
 
 ```bash
-code --install-extension netease-music-0.3.10-win32-x64.vsix
+code --install-extension netease-music-0.3.11-win32-x64.vsix
 ```
 
 当前市场包目标平台为 **Windows x64**；其他平台可从源码构建。

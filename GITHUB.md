@@ -17,8 +17,8 @@ node scripts/publish-github.mjs
 
 - 创建或复用仓库；
 - 上传源码（忽略 `node_modules`、`dist`、`components`、`tmp` 等）；
-- 创建 `v0.3.10` Release；
-- 上传 `dist-vsix/netease-music-0.3.10-win32-x64.vsix`。
+- 创建 `v0.3.11` Release；
+- 上传 `dist-vsix/netease-music-0.3.11-win32-x64.vsix`。
 
 ### 自定义
 
@@ -35,7 +35,7 @@ node scripts/publish-github.mjs
 
 打开 <https://marketplace.visualstudio.com/manage>，使用 Microsoft 账号登录，创建 Publisher：
 
-- Publisher ID：`Netease-Music-VScode`
+- Publisher ID：`AICis`
 - Display name：`网易云音乐 for VScode`
 
 ### 2. 创建 PAT
@@ -58,10 +58,10 @@ C:\Users\Administrator\.vsce-token
 
 ```powershell
 $env:VSCE_PAT = (Get-Content "$env:USERPROFILE\.vsce-token" -Raw).Trim()
-npx vsce publish --packagePath dist-vsix/netease-music-0.3.10-win32-x64.vsix --pat $env:VSCE_PAT
+npx vsce publish --packagePath dist-vsix/netease-music-0.3.11-win32-x64.vsix --pat $env:VSCE_PAT
 ```
 
-如果提示 publisher 不存在，先在管理页创建 `Netease-Music-VScode`。
+如果提示 publisher 不存在，先在管理页创建 `AICis`。
 
 ### 4. 后续更新
 
@@ -82,7 +82,7 @@ $env:GITHUB_TOKEN = & "C:\Program Files\GitHub CLI\gh.exe" auth token
 node scripts/publish-github.mjs
 
 $env:VSCE_PAT = (Get-Content "$env:USERPROFILE\.vsce-token" -Raw).Trim()
-npx vsce publish --packagePath dist-vsix/netease-music-0.3.10-win32-x64.vsix --pat $env:VSCE_PAT
+npx vsce publish --packagePath dist-vsix/netease-music-0.3.11-win32-x64.vsix --pat $env:VSCE_PAT
 ```
 
 Marketplace 会自动把新版本推送给已安装用户；VS Code 会按扩展市场版本提示更新。
