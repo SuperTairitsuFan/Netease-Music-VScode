@@ -105,17 +105,26 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider, vscode.D
   /** Reveal the sidebar and wait for its webview to be ready (used before the first play). */
   async ensureReady(): Promise<boolean> {
     if (this.ready && this.view) return true;
-    try {
-      await vscode.commands.executeCommand("neteaseMusic.sidebar.focus");
-    } catch {
-      /* command may be unavailable before the container is registered */
+    // `neteaseMusic.sidebar.focus` is the auto-generated view command; the
+    // container command is the reliable way to reveal a hidden view.
+    for (const command of [
+      "neteaseMusic.sidebar.focus",
+      "workbench.view.extension.neteaseMusic",
+      "neteaseMusic.focus",
+    ]) {
+      try {
+        await vscode.commands.executeCommand(command);
+      } catch {
+        /* command may be unavailable before the container is registered */
+      }
+      if (this.ready && this.view) return true;
     }
     if (this.ready && this.view) return true;
     return new Promise<boolean>((resolve) => {
       const timer = setTimeout(() => {
         this.pending = undefined;
-        resolve(this.ready);
-      }, 10000);
+        resolve(this.ready && Boolean(this.view));
+      }, 30000);
       this.pending = {
         resolve: () => {
           clearTimeout(timer);
@@ -123,6 +132,13 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider, vscode.D
         },
         timer,
       };
+      // A fast webview can send `ready` between the check above and the
+      // assignment of `pending`; resolve immediately in that case.
+      if (this.ready && this.view) {
+        clearTimeout(timer);
+        this.pending = undefined;
+        resolve(true);
+      }
     });
   }
 

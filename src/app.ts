@@ -569,6 +569,11 @@ export class App implements vscode.Disposable {
         const list = Array.isArray(payload.list) && payload.list.length ? (payload.list as Track[]) : undefined;
         const index = Number.isFinite(payload.index) ? Number(payload.index) : undefined;
         await this.player.playTrack(track, list, index);
+        if (this.player.state().error) {
+          await new Promise((resolve) => setTimeout(resolve, 350));
+          await this.ensureAudioHost();
+          await this.player.playTrack(track, list, index);
+        }
         break;
       }
       case "playQueueIndex":
@@ -1865,9 +1870,21 @@ export class App implements vscode.Disposable {
   }
 
   private async ensureAudioHost(): Promise<void> {
-    const ok = await this.sidebar.ensureReady();
+    let ok = await this.sidebar.ensureReady();
+    if (!ok) {
+      try {
+        await vscode.commands.executeCommand("workbench.view.extension.neteaseMusic");
+      } catch {
+        /* ignore */
+      }
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      ok = this.sidebar.isReady;
+    }
     if (!ok) throw new Error("音频宿主侧边栏未就绪，请打开「网易云音乐」侧边栏后重试");
     await this.player.refreshOutput();
+    const output = this.player.state().output;
+    if (output.kind === "none") throw new Error(output.detail);
+    log.info("audio host ready", `${output.kind}: ${output.label}`);
   }
 
   private async openInFileManager(dir: string): Promise<void> {
