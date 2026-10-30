@@ -15,6 +15,7 @@ import type {
 } from "../protocol";
 import { cover, esc, fmtCount, fmtDate, fmtDateTime, fmtTime, QUALITY_TEXT, qs, qsa } from "./dom";
 import { icon } from "./icons";
+import { AudioEngine } from "./audio";
 
 declare function acquireVsCodeApi(): {
   postMessage(message: unknown): void;
@@ -23,6 +24,7 @@ declare function acquireVsCodeApi(): {
 };
 
 const vscode = acquireVsCodeApi();
+const editorAudio = new AudioEngine((msg) => vscode.postMessage(msg));
 const send = (cmd: WebviewCommand, payload?: unknown): void => vscode.postMessage({ type: "cmd", cmd, payload });
 
 const app = document.getElementById("app")!;
@@ -2056,6 +2058,12 @@ window.addEventListener("message", (event: MessageEvent<HostMessage>) => {
       break;
     case "theme":
       document.body.dataset.theme = msg.kind;
+      break;
+    case "load":
+      void editorAudio.load(msg.request);
+      break;
+    case "control":
+      editorAudio.control(msg.action, msg.value);
       break;
     case "loginResult":
       toast(msg.message, msg.ok ? "success" : "error");

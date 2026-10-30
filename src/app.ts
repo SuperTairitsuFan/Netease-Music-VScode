@@ -108,6 +108,7 @@ export class App implements vscode.Disposable {
   private localTracks: LocalTrackView[] = [];
   private playlistOrder: number[] = [];
   private likedHydrated = false;
+  private audioOwner: "sidebar" | "main" = "sidebar";
   private localCount = 0;
   private cloudTracks: Track[] = [];
   private qrTimer?: NodeJS.Timeout;
@@ -145,6 +146,7 @@ export class App implements vscode.Disposable {
     });
     this.mainPanel = new MainPanelProvider(ctx, {
       ...hostDeps,
+      onAudio: (msg: WebviewMessage) => void this.player.onMessage(msg),
       onVisibility: (visible) => {
         if (!visible && !getConfig().playback.backgroundPlay) void this.player.pause();
       },
@@ -233,14 +235,30 @@ export class App implements vscode.Disposable {
   // ------------------------------------------------------------ webview glue
 
   private routePlayerMessage(msg: HostMessage): void {
+    if (msg.type === "load") {
+      // WebAudio must live in the editor webview when it is visible so the
+      // click that started playback still counts as a user gesture. Native
+      // output stays in the persistent sidebar host.
+      if (!msg.request.native && this.mainPanel.isReady) {
+        this.audioOwner = "main";
+        this.mainPanel.post(msg);
+      } else {
+        this.audioOwner = "sidebar";
+        this.sidebar.post(msg);
+      }
+      return;
+    }
     if (
-      msg.type === "load" ||
       msg.type === "control" ||
       msg.type === "nativeReady" ||
       msg.type === "nativePcmAck" ||
       msg.type === "nativeFallback"
     ) {
-      this.sidebar.post(msg);
+      if (this.audioOwner === "main" && this.mainPanel.isReady && msg.type === "control") {
+        this.mainPanel.post(msg);
+      } else {
+        this.sidebar.post(msg);
+      }
       return;
     }
     if (msg.type === "playerError" || msg.type === "toast") {

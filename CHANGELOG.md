@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.19
+
+- WebAudio 宿主在编辑器 Webview 可见时使用编辑器音频元素，主界面点击可保留用户手势，解决“play() can only be initiated by a user gesture”。
+- 编辑器面板关闭后回退侧边栏宿主；原生输出仍由侧边栏宿主负责。
+- 保留原生 40ms 缓冲与不重启看门狗。
+
 ## 0.3.18
 
 - 原生输出不再被 6.5 秒 WebAudio 看门狗反复重启，修复播放撕裂/爆音。
