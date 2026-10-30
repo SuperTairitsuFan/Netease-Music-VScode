@@ -40,6 +40,7 @@ export class PlayerService implements vscode.Disposable {
   private lastTimeAt = 0;
   private stallTimer?: NodeJS.Timeout;
   private stallRetried = false;
+  private forceWebAudio = false;
   private position = 0;
   private duration = 0;
   private buffered = 0;
@@ -180,6 +181,7 @@ export class PlayerService implements vscode.Disposable {
 
   async restore(): Promise<void> {
     const cfg = this.getConfig();
+    this.forceWebAudio = this.ctx.globalState.get<boolean>("neteaseMusic.forceWebAudio") ?? false;
     const saved = this.ctx.globalState.get<PersistedPlayback>(PLAYBACK_KEY);
     if (saved?.volume !== undefined) this.volume = Math.max(0, Math.min(1, saved.volume));
     else this.volume = Math.max(0, Math.min(1, cfg.playback.volume / 100));
@@ -267,8 +269,16 @@ export class PlayerService implements vscode.Disposable {
   private async shouldUseNative(): Promise<boolean> {
     const cfg = this.getConfig();
     if (cfg.output.mode === "webaudio") return false;
+    if (this.forceWebAudio && cfg.output.mode !== "native") return false;
     const record = await this.components.nativeRecord();
     return record?.status === "ready";
+  }
+
+  private markNativeFailure(reason: string): void {
+    if (this.forceWebAudio) return;
+    this.forceWebAudio = true;
+    log.warn("native output disabled for this profile after failure", reason);
+    void this.ctx.globalState.update("neteaseMusic.forceWebAudio", true);
   }
 
   private nativeStrict(): boolean {
@@ -849,6 +859,7 @@ export class PlayerService implements vscode.Disposable {
       const message = (err as Error).message;
       const supported = err instanceof EngineError ? err.supported : undefined;
       if (!this.nativeStrict()) {
+        this.markNativeFailure(message);
         this.post({ type: "nativeFallback", songId: msg.songId, reason: message });
         this.post({ type: "toast", kind: "error", message: `原生引擎启动失败，已回退 WebAudio：${message}` });
         this.output = {
@@ -944,6 +955,7 @@ export class PlayerService implements vscode.Disposable {
         this.emit();
         break;
       case "nativeFallbackLocal":
+        this.markNativeFailure(msg.reason);
         await this.stopNative();
         this.output = {
           kind: "webaudio",

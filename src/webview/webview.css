@@ -3271,3 +3271,29 @@ svg {
 .volume-pop[hidden] { display: none; }
 .volume-pop input { width: 120px; accent-color: var(--red); }
 .volume-pop span { min-width: 34px; text-align: right; font-size: 10px; color: var(--muted); }
+.volume-pop {
+  position: fixed;
+  right: 12px;
+  bottom: 46px;
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+  padding: 10px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-soft);
+  box-shadow: var(--shadow);
+}
+.volume-pop[hidden] { display: none; }
+.volume-pop input[type="range"] {
+  writing-mode: vertical-lr;
+  direction: rtl;
+  width: 22px;
+  height: 112px;
+  padding: 8px 0;
+  overflow: visible;
+  accent-color: var(--red);
+}
+.volume-pop span { font-size: 10px; color: var(--muted); }

@@ -26,6 +26,7 @@ const logo = app.dataset.logo ?? "";
 let state: SidebarState | null = null;
 let player: PlayerState | null = null;
 let account: Account | null = null;
+let lastVolume = 0.8;
 
 const NAV_ITEMS: Array<{ key: string; label: string; icon: string; nav: string }> = [
   { key: "recommend", label: "推荐", icon: "home", nav: "recommend" },
@@ -49,7 +50,7 @@ function boot(): void {
       <button class="icon-btn quality-btn" data-act="quality" title="音质调节">${icon("music", 14)}<span id="side-quality">极高</span></button>
       <button class="icon-btn" data-act="sleepTimer" title="定时关闭">${icon("clock", 14)}</button>
       <button class="icon-btn rate-btn" data-act="playbackRate" title="播放速度">1.0x</button>
-      <button class="icon-btn" data-act="volumePopup" title="音量">${icon("volume", 14)}</button>
+      <button class="icon-btn" data-act="volumePopup" title="音量（双击静音）">${icon("volume", 14)}</button>
     </div>
     <div class="volume-pop" id="volume-pop" hidden>
       <input id="volume-range" type="range" min="0" max="100" step="1" value="80" />
@@ -64,6 +65,18 @@ function boot(): void {
     const label = qs<HTMLElement>("#volume-label");
     if (label) label.textContent = `${value}%`;
     send("setVolume", { value });
+  });
+  document.addEventListener("dblclick", (event) => {
+    const target = event.target as HTMLElement | null;
+    if (!target?.closest('[data-act="volumePopup"]')) return;
+    event.preventDefault();
+    const current = player?.volume ?? 0.8;
+    if (current > 0) {
+      lastVolume = current;
+      send("setVolume", { value: 0 });
+    } else {
+      send("setVolume", { value: Math.round(Math.max(0.1, lastVolume) * 100) });
+    }
   });
   vscode.postMessage({ type: "ready" });
 }
@@ -297,6 +310,7 @@ window.addEventListener("message", (event: MessageEvent<HostMessage>) => {
         const volumeLabel = qs<HTMLElement>("#volume-label");
         if (volume) volume.value = String(Math.round((player.volume ?? 0.8) * 100));
         if (volumeLabel) volumeLabel.textContent = `${Math.round((player.volume ?? 0.8) * 100)}%`;
+        if ((player.volume ?? 0) > 0) lastVolume = player.volume;
       }
       break;
     case "account":

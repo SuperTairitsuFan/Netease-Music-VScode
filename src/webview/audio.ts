@@ -229,7 +229,7 @@ export class AudioEngine {
           data: toBase64(new Uint8Array(interleaved.buffer)),
           frames,
         });
-        await this.waitAck(seq, 20000);
+        await this.waitAck(seq, 6000);
       }
       this.send({ type: "pcmDone", songId: request.song.id, totalFrames });
     } catch (err) {
