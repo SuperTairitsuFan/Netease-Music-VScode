@@ -268,7 +268,7 @@ export class App implements vscode.Disposable {
   }
 
   async handleCommand(cmd: string, payload?: unknown, surface: WebviewSurface = "main"): Promise<void> {
-    if (cmd !== "ready") log.info("command", { cmd, surface, id: (payload as any)?.id ?? (payload as any)?.track?.id });
+    if (cmd !== "ready" && cmd !== "setVolume" && cmd !== "seek") log.info("command", { cmd, surface, id: (payload as any)?.id ?? (payload as any)?.track?.id });
     try {
       if (cmd === "ready") {
         await this.sendInit(surface);

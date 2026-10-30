@@ -1,0 +1,4 @@
+﻿const {spawn}=require('child_process');const exe='components/win32-x64/native-audio-output.exe';const p=spawn(exe,['--serve'],{stdio:['pipe','pipe','pipe']});let out='';p.stdout.on('data',d=>{out+=d.toString();console.log('OUT',d.toString().trim())});p.stderr.on('data',d=>console.error('ERR',d.toString().trim()));
+const frame=(type,buf)=>{const h=Buffer.alloc(5);h[0]=type;h.writeUInt32LE(buf.length,1);p.stdin.write(h);p.stdin.write(buf)};
+const ctl=o=>frame(1,Buffer.from(JSON.stringify(o)));
+setTimeout(()=>{ctl({cmd:'configure',device:'default',sampleRate:48000,channels:2,bits:16,sampleFormat:'s16le',exclusive:false,bufferMs:10,volume:1});ctl({cmd:'start'});setTimeout(()=>{const frames=4800;const b=Buffer.alloc(frames*2*4);for(let i=0;i<200;i++)frame(2,b);setTimeout(()=>{console.log('done writes');p.stdin.end();setTimeout(()=>{p.kill();process.exit(0)},1000)},2000)},1000)},800);

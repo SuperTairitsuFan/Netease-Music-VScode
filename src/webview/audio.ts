@@ -236,7 +236,7 @@ export class AudioEngine {
       if (this.nativeAbort || this.current !== request) return;
       const message = (err as Error).message;
       this.send({ type: "nativeFallbackLocal", reason: message });
-      this.playElement({ ...request, native: false });
+      this.playElement({ ...request, native: false, url: request.localUri ?? request.url });
     }
   }
 

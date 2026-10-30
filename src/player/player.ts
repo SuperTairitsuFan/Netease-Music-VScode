@@ -942,6 +942,7 @@ export class PlayerService implements vscode.Disposable {
         await this.next();
         break;
       case "loadError":
+        log.warn("audio load error", msg.message);
         this.mediaLoaded = false;
         this.loading = false;
         this.playing = false;
@@ -955,6 +956,7 @@ export class PlayerService implements vscode.Disposable {
         this.emit();
         break;
       case "nativeFallbackLocal":
+        log.warn("native decode failed, falling back to WebAudio", msg.reason);
         this.markNativeFailure(msg.reason);
         await this.stopNative();
         this.output = {

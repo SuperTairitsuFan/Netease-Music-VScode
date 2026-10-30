@@ -192,11 +192,33 @@ export class NativeEngineSession extends EventEmitter {
     const header = Buffer.alloc(5);
     header.writeUInt8(FRAME_PCM, 0);
     header.writeUInt32LE(buffer.length, 1);
-    const okHeader = this.child.stdin.write(header);
-    const okBody = this.child.stdin.write(buffer);
-    if (!okHeader || !okBody) {
-      await new Promise<void>((resolve) => this.child.stdin.once("drain", () => resolve()));
-    }
+    await this.writeWithBackpressure(header);
+    await this.writeWithBackpressure(buffer);
+  }
+
+  private async writeWithBackpressure(buffer: Buffer): Promise<void> {
+    if (this.closed) throw new Error("原生引擎已关闭");
+    if (this.child.stdin.write(buffer)) return;
+    // `write()` returning false means the stream wants a drain. Attach the
+    // listener immediately and re-check the flag: a fast native process can
+    // drain between write() and listener registration, which used to deadlock
+    // and surface as "PCM 数据写入超时".
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.child.stdin.off("drain", onDrain);
+        reject(new Error("原生引擎 stdin 背压超时"));
+      }, 8000);
+      const onDrain = (): void => {
+        clearTimeout(timer);
+        resolve();
+      };
+      this.child.stdin.once("drain", onDrain);
+      if (!this.child.stdin.writableNeedDrain) {
+        clearTimeout(timer);
+        this.child.stdin.off("drain", onDrain);
+        resolve();
+      }
+    });
   }
 
   async pause(): Promise<void> {
