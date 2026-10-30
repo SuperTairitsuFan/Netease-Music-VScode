@@ -26,7 +26,7 @@ export function buildHtml(ctx: vscode.ExtensionContext, webview: vscode.Webview,
     vscode.Uri.joinPath(ctx.extensionUri, ...SCRIPT_BY_SURFACE[surface].split("/")),
   );
   const style = webview.asWebviewUri(vscode.Uri.joinPath(ctx.extensionUri, "dist", "webview.css"));
-  const logo = webview.asWebviewUri(vscode.Uri.joinPath(ctx.extensionUri, "media", "logo.svg"));
+  const logo = webview.asWebviewUri(vscode.Uri.joinPath(ctx.extensionUri, "media", "icon.png"));
   const n = nonce();
   const csp = [
     "default-src 'none'",

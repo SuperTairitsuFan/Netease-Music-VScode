@@ -43,7 +43,7 @@ export class MainPanelProvider implements vscode.Disposable {
     );
     this.ready = false;
     this.panel.webview.html = buildHtml(this.ctx, this.panel.webview, "main");
-    this.panel.iconPath = vscode.Uri.joinPath(this.ctx.extensionUri, "media", "music.svg");
+    this.panel.iconPath = vscode.Uri.joinPath(this.ctx.extensionUri, "media", "icon.png");
     this.panel.onDidDispose(() => {
       this.panel = undefined;
       this.ready = false;

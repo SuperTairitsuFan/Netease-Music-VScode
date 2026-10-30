@@ -43,7 +43,7 @@
         {
           "id": "neteaseMusic",
           "title": "网易云音乐",
-          "icon": "media/activity.svg"
+          "icon": "media/activity.png"
         }
       ]
     },
@@ -53,7 +53,7 @@
           "type": "webview",
           "id": "neteaseMusic.sidebar",
           "name": "网易云音乐",
-          "icon": "media/activity.svg",
+          "icon": "media/activity.png",
           "contextualTitle": "网易云音乐"
         }
       ]
