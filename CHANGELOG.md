@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.20
+
+- 高于 48kHz 的原生输出自动使用 WASAPI Exclusive，避免 shared mode 的 0x8889000a 初始化失败。
+- 原生配置写入日志（采样率/位深/独占）。
+- WebAudio 主界面宿主与自动播放修复保留。
+
 ## 0.3.19
 
 - WebAudio 宿主在编辑器 Webview 可见时使用编辑器音频元素，主界面点击可保留用户手势，解决“play() can only be initiated by a user gesture”。

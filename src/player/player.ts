@@ -808,6 +808,8 @@ export class PlayerService implements vscode.Disposable {
     this.nativeExpectedFrames = msg.length;
     this.nativeStartPosition = this.position;
     this.finishedNative = false;
+    const exclusive = cfg.output.exclusive || rate > 48000;
+    log.info("native configure", { rate, bits, sampleFormat, exclusive, bufferMs: Math.max(40, cfg.output.bufferMs) });
     try {
       const session = await NativeEngineSession.start(record.entryPath, {
         device: cfg.output.device || "default",
@@ -815,7 +817,10 @@ export class PlayerService implements vscode.Disposable {
         channels: msg.channels,
         bits,
         sampleFormat,
-        exclusive: cfg.output.exclusive,
+        // WASAPI shared mode cannot open 96k/192k on many devices. High-rate
+        // native playback must use exclusive mode; otherwise configure fails
+        // before PCM starts.
+        exclusive,
         bufferMs: Math.max(40, cfg.output.bufferMs),
         volume: this.volume,
       });
