@@ -224,19 +224,28 @@ export class PlayerService implements vscode.Disposable {
       return;
     }
     const webAudioEnabled = await this.components.isEnabled("core.player");
-    if (cfg.output.mode === "webaudio") {
+    const preferWebAudio = cfg.output.mode !== "native";
+    if (preferWebAudio) {
       this.output = webAudioEnabled
         ? {
             kind: "webaudio",
-            label: "WebAudio（Chromium 共享模式）",
-            detail: "48 kHz 重采样 · 非独占，无法 bit-perfect",
+            label: "WebAudio（优先）",
+            detail: "自动模式优先 WebAudio · 48 kHz 共享模式",
           }
-        : {
-            kind: "none",
-            label: "播放器组件已禁用",
-            detail: "output.mode 为 webaudio，但「播放器（WebAudio 兜底）」组件已禁用",
-            unavailableReason: "core.player 已禁用",
-          };
+        : ready
+          ? {
+              kind: "native",
+              label: `Native Engine · ${record?.backend ?? "系统音频"}`,
+              detail: cfg.output.exclusive ? "独占模式（就绪）" : "共享模式（就绪）",
+              backend: record?.backend,
+              unavailableReason: undefined,
+            }
+          : {
+              kind: "none",
+              label: "播放器组件已禁用",
+              detail: "请启用「播放器（WebAudio 兜底）」或安装原生音频引擎",
+              unavailableReason: "core.player 已禁用",
+            };
     } else if (ready) {
       this.output = {
         kind: "native",
@@ -268,8 +277,8 @@ export class PlayerService implements vscode.Disposable {
 
   private async shouldUseNative(): Promise<boolean> {
     const cfg = this.getConfig();
-    if (cfg.output.mode === "webaudio") return false;
-    if (this.forceWebAudio && cfg.output.mode !== "native") return false;
+    if (cfg.output.mode !== "native") return false;
+    if (this.forceWebAudio) return false;
     const record = await this.components.nativeRecord();
     return record?.status === "ready";
   }

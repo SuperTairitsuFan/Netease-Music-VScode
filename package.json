@@ -2,7 +2,7 @@
   "name": "netease-music",
   "displayName": "网易云音乐",
   "description": "网易云音乐 for VS Code：EAPI 直连、PC 风侧边栏、歌单/歌手/搜索/评论、封面下载与原生音频输出。",
-  "version": "0.3.21",
+  "version": "0.3.22",
   "publisher": "AICis",
   "license": "MIT",
   "engines": {
@@ -333,12 +333,12 @@
             "native"
           ],
           "enumDescriptions": [
-            "组件可用时使用原生引擎，否则回退到 WebAudio",
+            "优先 WebAudio；原生引擎仅在明确选择 native 或显式启用时使用",
             "始终使用 Chromium WebAudio（共享模式，采样率由系统决定）",
             "强制使用原生音频输出引擎；不可用时明确报错，不静默回退"
           ],
           "default": "auto",
-          "markdownDescription": "音频输出路径。原生引擎是独立组件，需在设置 → 组件中启用。"
+          "markdownDescription": "音频输出路径。auto 优先 WebAudio；native 强制原生引擎。"
         },
         "neteaseMusic.output.device": {
           "type": "string",

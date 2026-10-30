@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.22
+
+- auto 输出模式改为优先 WebAudio；仅显式选择 native 才使用原生引擎。
+- 修复原生独有格式/驱动导致的爆音与初始化失败对新用户的影响。
+
 ## 0.3.21
 
 - 原生音频 pump 线程加入 Windows MMCSS「Pro Audio」优先级，减少 WASAPI 爆音/撕裂。

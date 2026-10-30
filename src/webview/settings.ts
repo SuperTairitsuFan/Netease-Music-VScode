@@ -336,8 +336,8 @@ function renderSystem(): string {
   const bitOptions = ["auto", "16", "24", "32"];
   const sampleFormats = ["auto", "s16le", "s24le", "s32le", "f32le"];
   return `<div class="set-card"><div class="set-card-head"><div class="t">音频输出</div><div class="d">原生引擎由独立组件提供，可启用 / 禁用 / 卸载</div></div>
-    ${selectRow("输出模式", "auto 优先原生；native 强制原生，失败不回退", "output.mode", cfg.outputMode, [
-      { value: "auto", label: "自动（优先原生）" },
+    ${selectRow("输出模式", "auto 优先 WebAudio；native 强制原生，失败不回退", "output.mode", cfg.outputMode, [
+      { value: "auto", label: "自动（优先 WebAudio）" },
       { value: "webaudio", label: "仅 WebAudio" },
       { value: "native", label: "仅原生引擎" },
     ])}
