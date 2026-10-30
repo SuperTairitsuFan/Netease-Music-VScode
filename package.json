@@ -1,0 +1,667 @@
+{
+  "name": "netease-music",
+  "displayName": "网易云音乐",
+  "description": "网易云音乐 for VS Code：EAPI 直连、PC 风侧边栏、歌单/歌手/搜索/评论、封面下载与原生音频输出。",
+  "version": "0.3.10",
+  "publisher": "Netease-Music-VScode",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "keywords": [
+    "music",
+    "netease",
+    "netease-cloud-music",
+    "vscode-extension",
+    "audio",
+    "player",
+    "eapi",
+    "wasapi",
+    "网易云音乐",
+    "VSCode插件",
+    "实用",
+    "极简",
+    "DSH开发",
+    "个人开发"
+  ],
+  "icon": "media/icon.png",
+  "main": "./dist/extension.js",
+  "activationEvents": [
+    "onView:neteaseMusic.sidebar",
+    "onCommand:neteaseMusic.openMain",
+    "onCommand:neteaseMusic.playPause",
+    "onCommand:neteaseMusic.login",
+    "onCommand:neteaseMusic.openSettingsPanel",
+    "onCommand:neteaseMusic.back"
+  ],
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "neteaseMusic",
+          "title": "网易云音乐",
+          "icon": "media/music.svg"
+        }
+      ]
+    },
+    "views": {
+      "neteaseMusic": [
+        {
+          "type": "webview",
+          "id": "neteaseMusic.sidebar",
+          "name": "网易云音乐",
+          "icon": "media/music.svg",
+          "contextualTitle": "网易云音乐"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "neteaseMusic.openMain",
+        "title": "打开主界面",
+        "category": "网易云音乐",
+        "icon": "$(music)"
+      },
+      {
+        "command": "neteaseMusic.openNowPlaying",
+        "title": "打开正在播放",
+        "category": "网易云音乐",
+        "icon": "$(play-circle)"
+      },
+      {
+        "command": "neteaseMusic.openQueue",
+        "title": "打开播放队列",
+        "category": "网易云音乐",
+        "icon": "$(list-unordered)"
+      },
+      {
+        "command": "neteaseMusic.openMyProfile",
+        "title": "打开我的主页",
+        "category": "网易云音乐",
+        "icon": "$(account)"
+      },
+      {
+        "command": "neteaseMusic.openSettingsPanel",
+        "title": "打开设置（客户端风格）",
+        "category": "网易云音乐",
+        "icon": "$(settings-gear)"
+      },
+      {
+        "command": "neteaseMusic.playPause",
+        "title": "播放 / 暂停",
+        "category": "网易云音乐",
+        "icon": "$(play)"
+      },
+      {
+        "command": "neteaseMusic.next",
+        "title": "下一首",
+        "category": "网易云音乐",
+        "icon": "$(chevron-right)"
+      },
+      {
+        "command": "neteaseMusic.previous",
+        "title": "上一首",
+        "category": "网易云音乐",
+        "icon": "$(chevron-left)"
+      },
+      {
+        "command": "neteaseMusic.qualityPicker",
+        "title": "切换播放音质",
+        "category": "网易云音乐",
+        "icon": "$(verified)"
+      },
+      {
+        "command": "neteaseMusic.volumePicker",
+        "title": "调节音量",
+        "category": "网易云音乐",
+        "icon": "$(unmute)"
+      },
+      {
+        "command": "neteaseMusic.mute",
+        "title": "静音 / 取消静音",
+        "category": "网易云音乐"
+      },
+      {
+        "command": "neteaseMusic.volumeUp",
+        "title": "增大音量",
+        "category": "网易云音乐"
+      },
+      {
+        "command": "neteaseMusic.volumeDown",
+        "title": "减小音量",
+        "category": "网易云音乐"
+      },
+      {
+        "command": "neteaseMusic.search",
+        "title": "搜索歌曲",
+        "category": "网易云音乐",
+        "icon": "$(search)"
+      },
+      {
+        "command": "neteaseMusic.login",
+        "title": "登录网易云音乐",
+        "category": "网易云音乐",
+        "icon": "$(account)"
+      },
+      {
+        "command": "neteaseMusic.logout",
+        "title": "退出登录",
+        "category": "网易云音乐"
+      },
+      {
+        "command": "neteaseMusic.downloadCurrent",
+        "title": "下载当前歌曲",
+        "category": "网易云音乐",
+        "icon": "$(cloud-download)"
+      },
+      {
+        "command": "neteaseMusic.openSettings",
+        "title": "打开 VS Code 设置",
+        "category": "网易云音乐"
+      },
+      {
+        "command": "neteaseMusic.openConfigFile",
+        "title": "打开 settings.json（全部参数）",
+        "category": "网易云音乐"
+      },
+      {
+        "command": "neteaseMusic.showOutput",
+        "title": "显示日志",
+        "category": "网易云音乐",
+        "icon": "$(output)"
+      },
+      {
+        "command": "neteaseMusic.refresh",
+        "title": "刷新当前页面",
+        "category": "网易云音乐",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "neteaseMusic.focus",
+        "title": "聚焦网易云音乐",
+        "category": "网易云音乐"
+      },
+      {
+        "command": "neteaseMusic.playlist.open",
+        "title": "打开歌单",
+        "category": "网易云音乐"
+      },
+      {
+        "command": "neteaseMusic.components.install",
+        "title": "安装本地组件…",
+        "category": "网易云音乐",
+        "icon": "$(cloud-download)"
+      },
+      {
+        "command": "neteaseMusic.components.refresh",
+        "title": "刷新组件列表",
+        "category": "网易云音乐",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "neteaseMusic.components.docs",
+        "title": "查看组件开发文档",
+        "category": "网易云音乐"
+      },
+      {
+        "command": "neteaseMusic.components.enable",
+        "title": "启用组件",
+        "category": "网易云音乐",
+        "icon": "$(check)"
+      },
+      {
+        "command": "neteaseMusic.components.disable",
+        "title": "禁用组件",
+        "category": "网易云音乐",
+        "icon": "$(circle-slash)"
+      },
+      {
+        "command": "neteaseMusic.components.remove",
+        "title": "卸载组件",
+        "category": "网易云音乐",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "neteaseMusic.components.verify",
+        "title": "校验组件完整性",
+        "category": "网易云音乐",
+        "icon": "$(verified)"
+      },
+      {
+        "command": "neteaseMusic.components.info",
+        "title": "查看组件信息",
+        "icon": "$(info)"
+      },
+      {
+        "command": "neteaseMusic.components.locate",
+        "title": "重新定位组件二进制…",
+        "category": "网易云音乐",
+        "icon": "$(folder-opened)"
+      },
+      {
+        "command": "neteaseMusic.components.restoreBundled",
+        "title": "恢复随包原生引擎",
+        "category": "网易云音乐",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "neteaseMusic.components.openDir",
+        "title": "打开组件目录",
+        "category": "网易云音乐",
+        "icon": "$(folder)"
+      },
+      {
+        "command": "neteaseMusic.audio.selectDevice",
+        "title": "选择音频输出设备…",
+        "category": "网易云音乐",
+        "icon": "$(symbol-event)"
+      },
+      {
+        "command": "neteaseMusic.audio.probe",
+        "title": "探测音频输出设备与格式…",
+        "category": "网易云音乐",
+        "icon": "$(pulse)"
+      },
+      {
+        "command": "neteaseMusic.audio.showEngineInfo",
+        "title": "查看原生引擎设备与格式…",
+        "category": "网易云音乐"
+      },
+      {
+        "command": "neteaseMusic.back",
+        "title": "返回上一页",
+        "category": "网易云音乐",
+        "icon": "$(arrow-left)"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "neteaseMusic.refresh",
+          "when": "view == neteaseMusic.sidebar",
+          "group": "navigation@1"
+        },
+        {
+          "command": "neteaseMusic.openMain",
+          "when": "view == neteaseMusic.sidebar",
+          "group": "navigation@2"
+        },
+        {
+          "command": "neteaseMusic.openSettingsPanel",
+          "when": "view == neteaseMusic.sidebar",
+          "group": "navigation@3"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "neteaseMusic.components.enable",
+          "when": "false"
+        },
+        {
+          "command": "neteaseMusic.components.disable",
+          "when": "false"
+        },
+        {
+          "command": "neteaseMusic.components.remove",
+          "when": "false"
+        },
+        {
+          "command": "neteaseMusic.components.verify",
+          "when": "false"
+        },
+        {
+          "command": "neteaseMusic.components.locate",
+          "when": "false"
+        },
+        {
+          "command": "neteaseMusic.playlist.open",
+          "when": "false"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "网易云音乐",
+      "properties": {
+        "neteaseMusic.output.mode": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "webaudio",
+            "native"
+          ],
+          "enumDescriptions": [
+            "组件可用时使用原生引擎，否则回退到 WebAudio",
+            "始终使用 Chromium WebAudio（共享模式，采样率由系统决定）",
+            "强制使用原生音频输出引擎；不可用时明确报错，不静默回退"
+          ],
+          "default": "auto",
+          "markdownDescription": "音频输出路径。原生引擎是独立组件，需在设置 → 组件中启用。"
+        },
+        "neteaseMusic.output.device": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "原生引擎输出设备 ID。留空表示系统默认设备。可通过 `网易云音乐: 选择音频输出设备…` 选择。"
+        },
+        "neteaseMusic.output.sampleRate": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "44100",
+            "48000",
+            "88200",
+            "96000",
+            "176400",
+            "192000",
+            "352800",
+            "384000"
+          ],
+          "default": "auto",
+          "markdownDescription": "目标采样率。`auto` 表示由引擎按音源元数据与设备能力协商；手动指定时若设备不支持则报错，不自动回退。"
+        },
+        "neteaseMusic.output.bitDepth": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "16",
+            "24",
+            "32"
+          ],
+          "default": "auto",
+          "markdownDescription": "目标位深。`32` 是否可用取决于设备与驱动；组件在初始化时会探测设备真实能力。"
+        },
+        "neteaseMusic.output.sampleFormat": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "s16le",
+            "s24le",
+            "s32le",
+            "f32le"
+          ],
+          "default": "auto",
+          "description": "原生引擎设备端采样格式。auto 时优先选择与位深匹配的整数格式。"
+        },
+        "neteaseMusic.output.exclusive": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "请求独占模式（Windows WASAPI Exclusive / Linux ALSA `hw:` 直连）。独占模式下可绕过系统混音器与采样率转换；被其他程序占用时会报错。"
+        },
+        "neteaseMusic.output.bufferMs": {
+          "type": "number",
+          "default": 10,
+          "minimum": 3,
+          "maximum": 500,
+          "description": "原生引擎缓冲区时长（毫秒）。独占模式建议 3–20ms；过小可能产生爆音。"
+        },
+        "neteaseMusic.quality": {
+          "type": "string",
+          "enum": [
+            "standard",
+            "exhigh",
+            "lossless",
+            "hires",
+            "jyeffect",
+            "sky",
+            "jymaster"
+          ],
+          "enumDescriptions": [
+            "标准 128kbps",
+            "极高 320kbps（VIP）",
+            "无损 FLAC（VIP）",
+            "高解析度无损 Hi-Res（VIP）",
+            "高清臻音（SVIP）",
+            "沉浸环绕声（SVIP）",
+            "超清母带（SVIP）"
+          ],
+          "default": "exhigh",
+          "description": "在线播放音质档位。更高档位需要对应会员权限。"
+        },
+        "neteaseMusic.download.quality": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "standard",
+            "exhigh",
+            "lossless",
+            "hires",
+            "jyeffect",
+            "sky",
+            "jymaster"
+          ],
+          "default": "auto",
+          "description": "下载音质。auto 表示跟随当前播放音质。"
+        },
+        "neteaseMusic.download.dir": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "下载目录。留空使用系统音乐目录下的 `NetEaseMusic`（无法确定时使用用户主目录）。"
+        },
+        "neteaseMusic.download.filenameTemplate": {
+          "type": "string",
+          "default": "{artist} - {name}",
+          "description": "文件名模板，可用变量：{artist} {name} {album} {id} {quality}。"
+        },
+        "neteaseMusic.download.concurrent": {
+          "type": "number",
+          "default": 2,
+          "minimum": 1,
+          "maximum": 4,
+          "description": "同时下载的任务数。"
+        },
+        "neteaseMusic.download.writeMetadata": {
+          "type": "boolean",
+          "default": true,
+          "description": "为 MP3 写入 ID3v2 标签与封面；FLAC 暂不写入标签（文件保留原始元数据）。"
+        },
+        "neteaseMusic.download.saveLyric": {
+          "type": "boolean",
+          "default": true,
+          "description": "下载时同时保存同名 .lrc 歌词文件。"
+        },
+        "neteaseMusic.cache.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "启用音频缓存（避免重复解析直链与重复下载）。"
+        },
+        "neteaseMusic.cache.dir": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "音频缓存目录。留空使用扩展全局存储目录下的 `cache/audio`。"
+        },
+        "neteaseMusic.cache.maxSizeMB": {
+          "type": "number",
+          "default": 1024,
+          "minimum": 64,
+          "description": "缓存上限（MB），超出后按最近最少使用清理。"
+        },
+        "neteaseMusic.localMusic.dir": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "本地音乐目录。留空时扫描下载目录。支持 mp3 / flac / m4a / wav / ogg / ape。"
+        },
+        "neteaseMusic.api.baseUrl": {
+          "type": "string",
+          "default": "https://interface.music.163.com",
+          "description": "EAPI 接口基地址。一般保持默认；可指向兼容 EAPI 的自建代理。"
+        },
+        "neteaseMusic.api.timeout": {
+          "type": "number",
+          "default": 15000,
+          "minimum": 3000,
+          "maximum": 120000,
+          "description": "网络请求超时（毫秒）。"
+        },
+        "neteaseMusic.api.userAgent": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "自定义 User-Agent。留空使用内置桌面客户端标识。"
+        },
+        "neteaseMusic.api.realIP": {
+          "type": "string",
+          "default": "",
+          "description": "向网易云接口透传的真实 IP（realIP 参数），一般留空。"
+        },
+        "neteaseMusic.api.cookie": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "手动附加的 Cookie（例如只粘贴 `MUSIC_U=...`）。仅高级用户使用，会与登录会话合并。"
+        },
+        "neteaseMusic.playback.volume": {
+          "type": "number",
+          "default": 80,
+          "minimum": 0,
+          "maximum": 100,
+          "description": "播放音量（0–100）。"
+        },
+        "neteaseMusic.playback.mode": {
+          "type": "string",
+          "enum": [
+            "order",
+            "repeat",
+            "repeatOne",
+            "shuffle"
+          ],
+          "enumDescriptions": [
+            "顺序播放后停止",
+            "列表循环",
+            "单曲循环",
+            "随机播放"
+          ],
+          "default": "order",
+          "description": "播放模式。"
+        },
+        "neteaseMusic.playback.rememberQueue": {
+          "type": "boolean",
+          "default": true,
+          "description": "记住播放队列与当前曲目，重启 VS Code 后恢复。"
+        },
+        "neteaseMusic.playback.autoPlay": {
+          "type": "boolean",
+          "default": false,
+          "description": "打开播放器视图时自动继续上次的播放。"
+        },
+        "neteaseMusic.playback.backgroundPlay": {
+          "type": "boolean",
+          "default": true,
+          "description": "视图隐藏时继续播放。原生引擎由宿主进程输出，关闭主界面不受影响。"
+        },
+        "neteaseMusic.ui.theme": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "dark",
+            "light"
+          ],
+          "default": "auto",
+          "description": "界面配色。auto 跟随 VS Code 主题。"
+        },
+        "neteaseMusic.ui.showLyrics": {
+          "type": "boolean",
+          "default": true,
+          "description": "显示歌词面板。"
+        },
+        "neteaseMusic.ui.panels": {
+          "type": "object",
+          "default": {},
+          "markdownDescription": "各可折叠面板的展开状态，由界面自动维护。",
+          "additionalProperties": {
+            "type": "boolean"
+          }
+        },
+        "neteaseMusic.ui.compact": {
+          "type": "boolean",
+          "default": false,
+          "description": "紧凑模式：隐藏大封面，压缩间距，适合窄侧边栏。"
+        },
+        "neteaseMusic.ui.autoOpen": {
+          "type": "boolean",
+          "default": true,
+          "description": "VSCode 启动时自动打开网易云音乐主界面。"
+        },
+        "neteaseMusic.components.dir": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "组件 store 目录。留空使用扩展全局存储目录下的 `components/`。"
+        },
+        "neteaseMusic.components.nativeEnginePath": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "原生引擎二进制自定义路径（用于把二进制迁移到外置存储或统一管理目录）。留空使用组件 store 中的位置。"
+        },
+        "neteaseMusic.components.verifyHash": {
+          "type": "boolean",
+          "default": true,
+          "description": "加载组件前校验二进制 SHA-256 与清单是否一致。"
+        },
+        "neteaseMusic.components.autoDownload": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "原生引擎（WASAPI/ALSA）缺失或失效时，自动按 `#neteaseMusic.components.downloadUrl#` 下载并安装；先尝试恢复随包附带的副本。关闭后只提示、不下载。"
+        },
+        "neteaseMusic.components.downloadUrl": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "原生引擎组件 zip 的下载地址（含 `component.json` 与二进制）。留空时不自动下载。"
+        },
+        "neteaseMusic.logLevel": {
+          "type": "string",
+          "enum": [
+            "off",
+            "error",
+            "warn",
+            "info",
+            "debug"
+          ],
+          "default": "info",
+          "description": "输出面板日志级别。"
+        },
+        "neteaseMusic.cover.dir": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "点击歌曲封面下载图片的保存目录。留空使用下载目录下的 `covers` 文件夹。"
+        },
+        "neteaseMusic.cover.filenameTemplate": {
+          "type": "string",
+          "default": "{name} - {artist}",
+          "markdownDescription": "封面文件名模板，可用 `{name}`（曲名）与 `{artist}`（歌手）。"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "node esbuild.mjs",
+    "watch": "node esbuild.mjs --watch",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test test/*.test.mjs",
+    "package": "node scripts/package.mjs",
+    "vscode:prepublish": "npm run build",
+    "build:native": "node scripts/build-native.mjs",
+    "package:all": "node scripts/package.mjs --all"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "@types/qrcode": "^1.5.5",
+    "@types/vscode": "~1.85.0",
+    "@vscode/vsce": "^2.32.0",
+    "esbuild": "^0.23.0",
+    "typescript": "^5.5.0"
+  },
+  "dependencies": {
+    "qrcode": "^1.5.4"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/SuperTairitsuFan/Netease-Music-VScode.git"
+  },
+  "bugs": {
+    "url": "https://github.com/SuperTairitsuFan/Netease-Music-VScode/issues"
+  },
+  "homepage": "https://github.com/SuperTairitsuFan/Netease-Music-VScode#readme",
+  "galleryBanner": {
+    "color": "#0f1720",
+    "theme": "dark"
+  }
+}

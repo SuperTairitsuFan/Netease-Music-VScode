@@ -1,0 +1,998 @@
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
+import * as vscode from "vscode";
+import type { SessionManager } from "../auth/session";
+import type { MusicConfig, PlayMode, Quality } from "../config";
+import { QUALITY_LABELS } from "../config";
+import type { LyricPayload, SongUrlResult, Track } from "../api/types";
+import type { HostMessage, LoadRequest, NativeFormatView, OutputView, PlayerState, WebviewMessage } from "../protocol";
+import { downloadToFile } from "../download/fetcher";
+import { log } from "../util/logger";
+import type { AudioFormat, ComponentStore } from "./components";
+import { EngineError, NativeEngineSession } from "./nativeEngine";
+
+interface CachedUrl {
+  value: SongUrlResult;
+  expiresAt: number;
+}
+
+const QUEUE_KEY = "neteaseMusic.queue.v1";
+const PLAYBACK_KEY = "neteaseMusic.playback.v1";
+const RECENT_KEY = "neteaseMusic.recent.v1";
+const LIKED_KEY = "neteaseMusic.liked.v1";
+const RECENT_LIMIT = 100;
+
+interface PersistedPlayback {
+  volume?: number;
+  mode?: PlayMode;
+  ids?: number[];
+  index?: number;
+}
+
+export class PlayerService implements vscode.Disposable {
+  private queue: Track[] = [];
+  private index = -1;
+  private queueDirty = false;
+  private playing = false;
+  private loading = false;
+  private mediaLoaded = false;
+  private position = 0;
+  private duration = 0;
+  private buffered = 0;
+  private volume = 0.8;
+  private rate = 1;
+  private mode: PlayMode = "order";
+  private error: string | null = null;
+  private output: OutputView = { kind: "none", label: "未开始播放", detail: "等待播放" };
+  private preparing = 0;
+  private actualQuality = "";
+  private currentSong: Track | null = null;
+  private currentResolved: SongUrlResult | null = null;
+  private trialEnd = 0;
+  private playToken = 0;
+  private readonly urlCache = new Map<string, CachedUrl>();
+  private readonly lyricCache = new Map<number, LyricPayload>();
+  private readonly likedIds = new Set<number>();
+  private recentTracks: Track[] = [];
+  private nativeSession?: NativeEngineSession;
+  private nativeRate = 0;
+  private nativeStartPosition = 0;
+  private nativeReceivedFrames = 0;
+  private nativeExpectedFrames = 0;
+  private nativeSongId = 0;
+  private nativeWriteChain: Promise<void> = Promise.resolve();
+  private lastEmit = 0;
+  private emitTimer: NodeJS.Timeout | undefined;
+  private saveTimer: NodeJS.Timeout | undefined;
+  private finishedNative = false;
+
+  private readonly emitter = new vscode.EventEmitter<PlayerState>();
+  readonly onDidChange = this.emitter.event;
+
+  constructor(
+    private readonly ctx: vscode.ExtensionContext,
+    private readonly session: SessionManager,
+    private readonly components: ComponentStore,
+    private readonly getConfig: () => MusicConfig,
+  ) {}
+
+  private postFn?: (msg: HostMessage) => void;
+  private resourceUriFn?: (filePath: string) => string;
+
+  attach(post: (msg: HostMessage) => void, resourceUri: (filePath: string) => string): void {
+    this.postFn = post;
+    this.resourceUriFn = resourceUri;
+  }
+
+  private post(msg: HostMessage): void {
+    this.postFn?.(msg);
+  }
+
+  // ------------------------------------------------------------- state
+
+  get current(): Track | null {
+    return this.currentSong;
+  }
+
+  get isPlaying(): boolean {
+    return this.playing;
+  }
+
+  getQueue(): Track[] {
+    return this.queue;
+  }
+
+  getRecent(): Track[] {
+    return this.recentTracks;
+  }
+
+  isLiked(songId: number): boolean {
+    return this.likedIds.has(songId);
+  }
+
+  lyricText(): string {
+    return this.currentSong ? this.lyricCache.get(this.currentSong.id)?.lrc ?? "" : "";
+  }
+
+  sendCurrentLyric(): void {
+    const song = this.currentSong;
+    if (!song) return;
+    const cached = this.lyricCache.get(song.id);
+    if (cached) {
+      this.post({ type: "lyric", songId: song.id, lrc: cached.lrc, translation: cached.translation });
+    } else {
+      void this.loadLyric(song);
+    }
+  }
+
+  state(): PlayerState {
+    const cfg = this.getConfig();
+    return {
+      track: this.currentSong,
+      playing: this.playing,
+      loading: this.loading,
+      position: this.position,
+      duration: this.duration || (this.currentSong ? this.currentSong.duration / 1000 : 0),
+      buffered: this.buffered,
+      rate: this.rate,
+      volume: this.volume,
+      mode: this.mode,
+      quality: cfg.quality,
+      actualQuality: this.actualQuality,
+      liked: this.currentSong ? this.likedIds.has(this.currentSong.id) : false,
+      likedIds: [...this.likedIds],
+      error: this.error,
+      output: this.output,
+      queueLength: this.queue.length,
+      index: this.index,
+      preparing: this.preparing,
+    };
+  }
+
+  emit(force = true): void {
+    if (force) {
+      if (this.emitTimer) {
+        clearTimeout(this.emitTimer);
+        this.emitTimer = undefined;
+      }
+      this.lastEmit = Date.now();
+      this.emitter.fire(this.state());
+      this.post({ type: "state", state: this.state() });
+      return;
+    }
+    if (Date.now() - this.lastEmit < 200) {
+      if (!this.emitTimer) {
+        this.emitTimer = setTimeout(() => {
+          this.emitTimer = undefined;
+          this.emit(true);
+        }, 200);
+      }
+      return;
+    }
+    this.emit(true);
+  }
+
+  // ------------------------------------------------------------ restore
+
+  async restore(): Promise<void> {
+    const cfg = this.getConfig();
+    const saved = this.ctx.globalState.get<PersistedPlayback>(PLAYBACK_KEY);
+    if (saved?.volume !== undefined) this.volume = Math.max(0, Math.min(1, saved.volume));
+    else this.volume = Math.max(0, Math.min(1, cfg.playback.volume / 100));
+    if (saved?.mode) this.mode = saved.mode;
+    const recent = this.ctx.globalState.get<Track[]>(RECENT_KEY);
+    if (Array.isArray(recent)) this.recentTracks = recent.slice(0, RECENT_LIMIT);
+    const liked = this.ctx.globalState.get<number[]>(LIKED_KEY);
+    if (Array.isArray(liked)) for (const id of liked) this.likedIds.add(Number(id));
+    await this.refreshOutput();
+    this.emit();
+
+    const ids = saved?.ids ?? [];
+    const index = saved?.index ?? -1;
+    if (cfg.playback.rememberQueue && ids.length && index >= 0 && index < ids.length) {
+      try {
+        const tracks = await this.session.client.songDetail(ids);
+        if (tracks.length) {
+          this.queue = tracks;
+          this.index = Math.min(index, tracks.length - 1);
+          this.currentSong = this.queue[this.index] ?? null;
+          this.duration = this.currentSong ? this.currentSong.duration / 1000 : 0;
+          this.post({ type: "queue", tracks: this.queue, index: this.index });
+          this.emit();
+          if (cfg.playback.autoPlay && this.currentSong) void this.start(this.currentSong, 0);
+        }
+      } catch (err) {
+        log.warn("failed to restore queue", String(err));
+      }
+    }
+  }
+
+  // ------------------------------------------------------------- output
+
+  async refreshOutput(): Promise<void> {
+    const cfg = this.getConfig();
+    const record = await this.components.nativeRecord();
+    const ready = record?.status === "ready";
+    if (this.nativeSession) {
+      this.emit();
+      return;
+    }
+    const webAudioEnabled = await this.components.isEnabled("core.player");
+    if (cfg.output.mode === "webaudio") {
+      this.output = webAudioEnabled
+        ? {
+            kind: "webaudio",
+            label: "WebAudio（Chromium 共享模式）",
+            detail: "48 kHz 重采样 · 非独占，无法 bit-perfect",
+          }
+        : {
+            kind: "none",
+            label: "播放器组件已禁用",
+            detail: "output.mode 为 webaudio，但「播放器（WebAudio 兜底）」组件已禁用",
+            unavailableReason: "core.player 已禁用",
+          };
+    } else if (ready) {
+      this.output = {
+        kind: "native",
+        label: `Native Engine · ${record?.backend ?? "系统音频"}`,
+        detail: cfg.output.exclusive ? "独占模式（就绪）" : "共享模式（就绪）",
+        backend: record?.backend,
+        unavailableReason: undefined,
+      };
+    } else if (!webAudioEnabled) {
+      this.output = {
+        kind: "none",
+        label: "播放器组件已禁用",
+        detail: "启用「播放器（WebAudio 兜底）」组件，或安装原生音频引擎",
+        unavailableReason: "core.player 已禁用",
+      };
+    } else {
+      this.output = {
+        kind: "webaudio",
+        label: "WebAudio（兜底）",
+        detail:
+          cfg.output.mode === "native"
+            ? "原生引擎未就绪，已回退 WebAudio"
+            : "原生引擎未安装/未启用，使用 WebAudio",
+        unavailableReason: record?.reason ?? "未安装 Native Audio Output Engine",
+      };
+    }
+    this.emit();
+  }
+
+  private async shouldUseNative(): Promise<boolean> {
+    const cfg = this.getConfig();
+    if (cfg.output.mode === "webaudio") return false;
+    const record = await this.components.nativeRecord();
+    return record?.status === "ready";
+  }
+
+  private nativeStrict(): boolean {
+    return this.getConfig().output.mode === "native";
+  }
+
+  // ------------------------------------------------------------ playback
+
+  async setQueueAndPlay(tracks: Track[], startIndex: number, autoplay = true): Promise<void> {
+    if (!tracks.length) return;
+    this.queue = tracks;
+    this.index = Math.max(0, Math.min(startIndex, tracks.length - 1));
+    this.post({ type: "queue", tracks: this.queue, index: this.index });
+    this.persistQueue();
+    const song = this.queue[this.index];
+    if (song) {
+      if (autoplay) await this.start(song, 0);
+      else {
+        this.currentSong = song;
+        this.duration = song.duration / 1000;
+        this.emit();
+      }
+    }
+  }
+
+  async playTrack(track: Track, list?: Track[], listIndex?: number): Promise<void> {
+    let targetIndex = this.queue.findIndex((t) => t.id === track.id);
+    if (list && list.length) {
+      const idx = listIndex ?? list.findIndex((t) => t.id === track.id);
+      this.queue = list;
+      targetIndex = Math.max(0, idx);
+    } else if (targetIndex < 0) {
+      this.queue = [track];
+      targetIndex = 0;
+    }
+    this.index = targetIndex;
+    this.post({ type: "queue", tracks: this.queue, index: this.index });
+    this.persistQueue();
+    await this.start(track, 0);
+  }
+
+  async playAt(index: number): Promise<void> {
+    if (index < 0 || index >= this.queue.length) return;
+    this.index = index;
+    this.post({ type: "queue", tracks: this.queue, index: this.index });
+    this.persistQueue();
+    await this.start(this.queue[index], 0);
+  }
+
+  /** Play a local file through the WebAudio bridge (no EAPI URL resolution). */
+  async playLocal(track: Track, uri: string): Promise<void> {
+    await this.stopNative();
+    this.currentSong = track;
+    this.duration = 0;
+    this.position = 0;
+    this.buffered = 0;
+    this.loading = false;
+    this.playing = true;
+    this.mediaLoaded = true;
+    this.error = null;
+    this.actualQuality = "local";
+    this.trialEnd = 0;
+    this.recordRecent(track);
+    this.queue = [track];
+    this.index = 0;
+    this.post({ type: "queue", tracks: this.queue, index: this.index });
+    this.post({
+      type: "load",
+      request: {
+        song: track,
+        url: uri,
+        native: false,
+        local: true,
+        position: 0,
+        volume: this.volume,
+        duration: 0,
+      },
+    });
+    this.emit();
+  }
+
+  /** Insert a track immediately after the current one ("下一首播放"). */
+  playNext(track: Track): void {
+    const at = this.index >= 0 ? this.index + 1 : this.queue.length;
+    this.queue.splice(Math.min(at, this.queue.length), 0, track);
+    if (this.index < 0) this.index = 0;
+    this.post({ type: "queue", tracks: this.queue, index: this.index });
+    this.persistQueue();
+    this.emit();
+  }
+
+  markLiked(songIds: number[]): void {
+    let changed = false;
+    for (const id of songIds) {
+      if (!this.likedIds.has(id)) {
+        this.likedIds.add(id);
+        changed = true;
+      }
+    }
+    if (changed) {
+      this.persistLiked();
+      this.emit();
+    }
+  }
+
+  async toggleLike(songId: number): Promise<boolean> {    if (!this.session.loggedIn) throw new Error("请先登录后再收藏");
+    const next = !this.likedIds.has(songId);
+    await this.session.client.like(songId, next);
+    if (next) this.likedIds.add(songId);
+    else this.likedIds.delete(songId);
+    this.persistLiked();
+    this.emit();
+    return next;
+  }
+
+  async toggle(): Promise<void> {
+    if (this.loading) return;
+    if (!this.currentSong) {
+      if (this.queue.length) await this.playAt(Math.max(0, this.index));
+      return;
+    }
+    if (!this.mediaLoaded) {
+      await this.start(this.currentSong, this.position || 0);
+      return;
+    }
+    if (this.playing) {
+      this.playing = false;
+      this.post({ type: "control", action: "pause" });
+      this.nativeSession?.pause().catch(() => undefined);
+      this.emit();
+      return;
+    }
+    if (this.nativeSession) {
+      this.nativeSession.resume().catch(() => undefined);
+      this.playing = true;
+      this.emit();
+      return;
+    }
+    if (this.position >= this.duration - 0.3) {
+      await this.start(this.currentSong, 0);
+      return;
+    }
+    this.playing = true;
+    this.post({ type: "control", action: "play" });
+    this.emit();
+  }
+
+  /** Pause without toggling back on (used when background playback is off). */
+  async pause(): Promise<void> {
+    if (!this.playing) return;
+    this.playing = false;
+    this.post({ type: "control", action: "pause" });
+    if (this.nativeSession) await this.nativeSession.pause().catch(() => undefined);
+    this.emit();
+  }
+
+  async stop(): Promise<void> {
+    this.post({ type: "control", action: "stop" });
+    await this.stopNative();
+    this.playing = false;
+    this.loading = false;
+    this.mediaLoaded = false;
+    this.position = 0;
+    this.buffered = 0;
+    this.emit();
+  }
+
+  async seek(seconds: number): Promise<void> {
+    if (!this.currentSong) return;
+    const target = Math.max(0, Math.min(seconds, this.duration || seconds));
+    this.position = target;
+    if (this.nativeSession) {
+      await this.startNativePlayback(this.currentSong, target);
+      return;
+    }
+    this.post({ type: "control", action: "seek", value: target });
+    this.emit();
+  }
+
+  async setVolume(volume: number): Promise<void> {
+    this.volume = Math.max(0, Math.min(1, volume));
+    this.post({ type: "control", action: "volume", value: this.volume });
+    this.nativeSession?.setVolume(this.volume);
+    this.emit();
+    this.scheduleSave();
+  }
+
+  async setRate(rate: number): Promise<void> {
+    this.rate = Math.max(0.5, Math.min(3, rate));
+    this.post({ type: "control", action: "rate", value: this.rate });
+    this.emit();
+    this.scheduleSave();
+  }
+
+  async setMode(mode: PlayMode): Promise<void> {
+    this.mode = mode;
+    this.emit();
+    this.scheduleSave();
+  }
+
+  async setQuality(quality: Quality): Promise<void> {
+    await vscode.workspace.getConfiguration("neteaseMusic").update("quality", quality, vscode.ConfigurationTarget.Global);
+    this.urlCache.clear();
+    this.emit();
+    if (this.currentSong && this.playing) await this.start(this.currentSong, this.position);
+  }
+
+  /** Re-resolve and restart the current track (used after output format changes). */
+  async restartCurrent(): Promise<void> {
+    if (!this.currentSong) return;
+    await this.start(this.currentSong, this.position);
+  }
+
+  async likeCurrent(): Promise<boolean> {
+    if (!this.currentSong) return false;
+    return this.toggleLike(this.currentSong.id);
+  }
+
+  async next(userInitiated = false): Promise<void> {
+    if (!this.queue.length) return;
+    if (this.queue.length === 1 && !userInitiated) {
+      await this.stop();
+      return;
+    }
+    let nextIndex: number;
+    if (this.mode === "shuffle") {
+      if (this.queue.length === 1) nextIndex = 0;
+      else {
+        do {
+          nextIndex = Math.floor(Math.random() * this.queue.length);
+        } while (nextIndex === this.index);
+      }
+    } else if (this.mode === "repeatOne" && !userInitiated) {
+      nextIndex = this.index;
+    } else {
+      nextIndex = this.index + 1;
+      if (nextIndex >= this.queue.length) {
+        if (this.mode === "repeat" || userInitiated) nextIndex = 0;
+        else {
+          await this.stop();
+          return;
+        }
+      }
+    }
+    await this.playAt(nextIndex);
+  }
+
+  async previous(): Promise<void> {
+    if (!this.queue.length) return;
+    if (this.position > 3) {
+      await this.seek(0);
+      return;
+    }
+    const prev = this.index - 1 < 0 ? (this.mode === "repeat" ? this.queue.length - 1 : 0) : this.index - 1;
+    await this.playAt(prev);
+  }
+
+  addToQueue(track: Track): void {
+    this.queue.push(track);
+    this.post({ type: "queue", tracks: this.queue, index: this.index });
+    this.persistQueue();
+    this.emit();
+  }
+
+  addManyToQueue(tracks: Track[]): void {
+    this.queue.push(...tracks);
+    this.post({ type: "queue", tracks: this.queue, index: this.index });
+    this.persistQueue();
+    this.emit();
+  }
+
+  removeFromQueue(index: number): void {
+    if (index < 0 || index >= this.queue.length) return;
+    this.queue.splice(index, 1);
+    if (index < this.index) this.index -= 1;
+    else if (index === this.index) this.index = Math.min(this.index, this.queue.length - 1);
+    this.post({ type: "queue", tracks: this.queue, index: this.index });
+    this.persistQueue();
+    this.emit();
+  }
+
+  clearQueue(): void {
+    void this.stop();
+    this.queue = [];
+    this.index = -1;
+    this.currentSong = null;
+    this.post({ type: "queue", tracks: [], index: -1 });
+    this.persistQueue();
+    this.emit();
+  }
+
+  // ------------------------------------------------------------- engine
+
+  private async startNativePlayback(song: Track, position: number): Promise<void> {
+    await this.start(song, position);
+  }
+
+  private async start(song: Track, position: number): Promise<void> {
+    if (this.output.kind === "none") throw new Error(this.output.detail);
+    const token = ++this.playToken;
+    await this.stopNative();
+    this.currentSong = song;
+    this.duration = song.duration / 1000;
+    this.position = position;
+    this.loading = true;
+    this.mediaLoaded = false;
+    this.playing = false;
+    this.error = null;
+    this.preparing = 0;
+    this.actualQuality = "";
+    this.trialEnd = 0;
+    this.recordRecent(song);
+    this.emit();
+
+    if (song.localPath) {
+      const localUri = this.resourceUriFn?.(song.localPath) ?? "";
+      if (!localUri) throw new Error("无法读取本地音乐文件");
+      this.currentResolved = null;
+      this.actualQuality = "local";
+      this.output = { kind: "webaudio", label: "本地文件", detail: "本地音乐 · WebAudio" };
+      this.loading = false;
+      this.playing = true;
+      this.mediaLoaded = true;
+      this.post({
+        type: "load",
+        request: {
+          song,
+          url: localUri,
+          native: false,
+          local: true,
+          position,
+          volume: this.volume,
+          duration: 0,
+        },
+      });
+      this.emit();
+      return;
+    }
+
+    void this.loadLyric(song);
+
+    try {
+      const resolved = await this.resolveUrl(song);
+      if (token !== this.playToken) return;
+      if (!resolved.url) throw new Error(resolved.code === 404 ? "该歌曲无版权或已下架" : "无法获取播放地址");
+      this.currentResolved = resolved;
+      this.actualQuality = resolved.level ?? "";
+      this.trialEnd = resolved.freeTrialInfo?.end ?? 0;
+      if (resolved.sampleRate) this.duration = this.duration || song.duration / 1000;
+
+      const useNative = await this.shouldUseNative();
+      if (token !== this.playToken) return;
+      if (useNative) {
+        try {
+          const filePath = await this.ensureAudioFile(song, resolved, token);
+          if (token !== this.playToken) return;
+          const localUri = this.resourceUriFn?.(filePath) ?? "";
+          const request: LoadRequest = {
+            song,
+            url: resolved.url,
+            localUri,
+            native: true,
+            position,
+            volume: this.volume,
+            duration: this.duration,
+            gain: resolved.gain,
+            trialEnd: this.trialEnd,
+            sourceSampleRate: resolved.sampleRate,
+          };
+          this.mediaLoaded = true;
+          this.post({ type: "load", request });
+          this.loading = false;
+          this.emit();
+          return;
+        } catch (err) {
+          if (token !== this.playToken) return;
+          if (this.nativeStrict()) {
+            throw new Error(`原生输出准备失败：${(err as Error).message}`);
+          }
+          log.warn("native preparation failed, falling back to WebAudio", String(err));
+          this.post({
+            type: "toast",
+            kind: "error",
+            message: `原生引擎不可用，已回退 WebAudio：${(err as Error).message}`,
+          });
+        }
+      }
+
+      const request: LoadRequest = {
+        song,
+        url: resolved.url,
+        native: false,
+        position,
+        volume: this.volume,
+        duration: this.duration,
+        gain: resolved.gain,
+        trialEnd: this.trialEnd,
+        sourceSampleRate: resolved.sampleRate,
+      };
+      this.mediaLoaded = true;
+          this.post({ type: "load", request });
+      this.loading = false;
+      this.output = {
+        kind: "webaudio",
+        label: "WebAudio（Chromium 共享模式）",
+        detail: "48 kHz 重采样 · 非独占",
+      };
+      this.emit();
+    } catch (err) {
+      if (token !== this.playToken) return;
+      this.loading = false;
+      this.playing = false;
+      this.error = (err as Error).message;
+      this.emit();
+      this.post({ type: "playerError", message: this.error });
+    }
+  }
+
+  private async resolveUrl(song: Track): Promise<SongUrlResult> {
+    const cfg = this.getConfig();
+    const key = `${song.id}:${cfg.quality}`;
+    const cached = this.urlCache.get(key);
+    if (cached && cached.expiresAt > Date.now() && cached.value.url) return cached.value;
+    const value = await this.session.client.songUrl(song.id, cfg.quality);
+    const ttl = Math.max(30, (value.expi ?? 1200) - 10);
+    this.urlCache.set(key, { value, expiresAt: Date.now() + ttl * 1000 });
+    return value;
+  }
+
+  private async ensureAudioFile(song: Track, resolved: SongUrlResult, token: number): Promise<string> {
+    if (!resolved.url) throw new Error("播放地址为空");
+    const cfg = this.getConfig();
+    const ext = resolved.type === "flac" ? "flac" : "mp3";
+    const dir = cfg.cache.enabled
+      ? cfg.cache.dir || path.join(this.ctx.globalStorageUri.fsPath, "cache", "audio")
+      : path.join(this.ctx.globalStorageUri.fsPath, "cache", "audio");
+    const file = path.join(dir, `${song.id}-${cfg.quality}-${resolved.br}.${ext}`);
+    const stat = await fs.stat(file).catch(() => null);
+    if (stat?.isFile() && stat.size > 1024) return file;
+    this.preparing = 1;
+    this.emit();
+    let last = 0;
+    await downloadToFile(resolved.url, file, {
+      onProgress: (p) => {
+        if (token !== this.playToken) return;
+        const now = Date.now();
+        if (now - last > 200) {
+          last = now;
+          this.preparing = p.total ? Math.min(99, Math.round((p.received / p.total) * 100)) : 1;
+          this.emit(false);
+        }
+      },
+    });
+    this.preparing = 100;
+    this.emit();
+    return file;
+  }
+
+  private async loadLyric(song: Track): Promise<void> {
+    try {
+      let payload = this.lyricCache.get(song.id);
+      if (!payload) {
+        payload = await this.session.client.lyric(song.id);
+        this.lyricCache.set(song.id, payload);
+      }
+      if (this.currentSong?.id === song.id) {
+        this.post({ type: "lyric", songId: song.id, lrc: payload.lrc, translation: payload.translation });
+      }
+    } catch (err) {
+      log.debug("lyric unavailable", String(err));
+      this.post({ type: "lyric", songId: song.id, lrc: "", translation: "" });
+    }
+  }
+
+  // --------------------------------------------------------- native path
+
+  private async handleNativeBegin(msg: Extract<WebviewMessage, { type: "nativeBegin" }>): Promise<void> {
+    const cfg = this.getConfig();
+    const record = await this.components.nativeRecord();
+    if (!record?.entryPath) throw new Error("原生引擎组件不存在");
+    const requestedRate = cfg.output.sampleRate === "auto" ? msg.sampleRate : Number(cfg.output.sampleRate);
+    if (requestedRate !== msg.sampleRate) {
+      const message =
+        `输出采样率 ${requestedRate} Hz 与音源 ${msg.sampleRate} Hz 不一致；` +
+        "引擎不做重采样，请把 output.sampleRate 设为 auto 或与音源一致的采样率";
+      if (!this.nativeStrict()) {
+        this.error = message;
+        this.emit();
+        this.post({ type: "nativeFallback", songId: msg.songId, reason: message });
+        this.post({ type: "toast", kind: "error", message: `原生输出未启用：${message}` });
+        return;
+      }
+      this.loading = false;
+      this.playing = false;
+      this.error = message;
+      this.emit();
+      this.post({ type: "playerError", message });
+      return;
+    }
+    const rate = msg.sampleRate;
+    const bits = cfg.output.bitDepth === "auto" ? 32 : Number(cfg.output.bitDepth);
+    const sampleFormat = cfg.output.sampleFormat === "auto" ? "f32le" : cfg.output.sampleFormat;
+    await this.stopNative();
+    this.nativeSongId = msg.songId;
+    this.nativeReceivedFrames = 0;
+    this.nativeExpectedFrames = msg.length;
+    this.nativeStartPosition = this.position;
+    this.finishedNative = false;
+    try {
+      const session = await NativeEngineSession.start(record.entryPath, {
+        device: cfg.output.device || "default",
+        sampleRate: rate,
+        channels: msg.channels,
+        bits,
+        sampleFormat,
+        exclusive: cfg.output.exclusive,
+        bufferMs: cfg.output.bufferMs,
+        volume: this.volume,
+      });
+      this.nativeSession = session;
+      const event = session.configured;
+      const format: AudioFormat =
+        event?.format ?? ({ sampleRate: rate, channels: msg.channels, bits, sampleFormat } as AudioFormat);
+      this.nativeRate = format.sampleRate;
+      session.on("progress", (p: any) => this.onNativeProgress(p));
+      session.on("drained", () => void this.finishNative());
+      session.on("closed", () => {
+        if (this.nativeSession === session) this.nativeSession = undefined;
+      });
+      session.on("engineError", (err: EngineError) => {
+        this.error = err.message;
+        this.emit();
+        this.post({ type: "playerError", message: err.message });
+      });
+      this.output = {
+        kind: "native",
+        label: `Native Engine · ${format.sampleRate} Hz / ${format.bits} bit`,
+        detail: `${cfg.output.exclusive ? "独占" : "共享"} · ${format.channels} 声道 · ${cfg.output.bufferMs} ms 缓冲`,
+        backend: record.backend,
+        format: {
+          sampleRate: format.sampleRate,
+          bits: format.bits,
+          channels: format.channels,
+          sampleFormat: format.sampleFormat,
+        },
+        deviceName: event?.device?.name,
+      };
+      this.playing = true;
+      this.loading = false;
+      this.emit();
+      this.post({
+        type: "nativeReady",
+        songId: msg.songId,
+        format: this.output.format as NativeFormatView,
+        maxChunkFrames: Math.max(1024, Math.min(16384, Number(event?.bufferFrames ?? 4096) * 2)),
+      });
+    } catch (err) {
+      const message = (err as Error).message;
+      const supported = err instanceof EngineError ? err.supported : undefined;
+      if (!this.nativeStrict()) {
+        this.post({ type: "nativeFallback", songId: msg.songId, reason: message });
+        this.post({ type: "toast", kind: "error", message: `原生引擎启动失败，已回退 WebAudio：${message}` });
+        this.output = {
+          kind: "webaudio",
+          label: "WebAudio（兜底）",
+          detail: `原生引擎启动失败：${message}`,
+          unavailableReason: message,
+        };
+        this.emit();
+        return;
+      }
+      this.error = supported
+        ? `${message}；设备支持的格式：${JSON.stringify(supported)}`
+        : message;
+      this.loading = false;
+      this.playing = false;
+      this.emit();
+      this.post({ type: "playerError", message: this.error });
+    }
+  }
+
+  private onNativeProgress(progress: { frames?: number; playedFrames?: number }): void {
+    const frames = Number(progress.playedFrames ?? progress.frames ?? 0);
+    if (!this.nativeRate) return;
+    this.nativeReceivedFrames = frames;
+    this.position = this.nativeStartPosition + frames / this.nativeRate;
+    if (this.duration && this.position > this.duration) this.position = this.duration;
+    if (this.nativeExpectedFrames && frames >= this.nativeExpectedFrames) {
+      void this.finishNative();
+      return;
+    }
+    this.emit(false);
+  }
+
+  private async finishNative(): Promise<void> {
+    if (this.finishedNative) return;
+    this.finishedNative = true;
+    await this.stopNative();
+    this.playing = false;
+    this.position = this.duration;
+    this.emit();
+    await this.next();
+  }
+
+  private async stopNative(): Promise<void> {
+    const session = this.nativeSession;
+    this.nativeSession = undefined;
+    this.nativeRate = 0;
+    this.nativeExpectedFrames = 0;
+    if (session) {
+      try {
+        await session.dispose();
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+
+  // ------------------------------------------------------------- messages
+
+  async onMessage(msg: WebviewMessage): Promise<void> {
+    switch (msg.type) {
+      case "ready":
+        this.emit();
+        break;
+      case "time":
+        if (!this.nativeSession) {
+          this.position = msg.position;
+          this.buffered = Math.max(this.position, msg.buffered ?? 0);
+          if (msg.duration) this.duration = msg.duration;
+          if (!this.playing && !this.loading) this.playing = true;
+          this.emit(false);
+        }
+        break;
+      case "ended":
+        this.playing = false;
+        this.mediaLoaded = false;
+        this.emit();
+        await this.next();
+        break;
+      case "loadError":
+        this.mediaLoaded = false;
+        this.loading = false;
+        this.playing = false;
+        this.error = msg.message;
+        this.emit();
+        break;
+      case "decodeError":
+        if (this.nativeSession) break;
+        this.post({ type: "playerError", message: msg.message });
+        this.error = msg.message;
+        this.emit();
+        break;
+      case "nativeFallbackLocal":
+        await this.stopNative();
+        this.output = {
+          kind: "webaudio",
+          label: "WebAudio（兜底）",
+          detail: `原生路径不可用：${msg.reason}`,
+          unavailableReason: msg.reason,
+        };
+        this.loading = false;
+        this.playing = true;
+        this.emit();
+        if (!/采样率|sampleRate/i.test(msg.reason)) {
+          this.post({ type: "toast", kind: "error", message: `原生解码失败，已回退 WebAudio：${msg.reason}` });
+        }
+        break;
+      case "nativeBegin":
+        await this.handleNativeBegin(msg);
+        break;
+      case "pcm": {
+        const buffer = Buffer.from(msg.data, "base64");
+        this.nativeWriteChain = this.nativeWriteChain
+          .then(async () => {
+            const session = this.nativeSession;
+            if (!session) return;
+            await session.writePcm(buffer);
+            this.post({ type: "nativePcmAck", seq: msg.seq });
+          })
+          .catch((err) => {
+            this.error = (err as Error).message;
+            this.emit();
+          });
+        break;
+      }
+      case "pcmDone":
+        this.nativeExpectedFrames = msg.totalFrames || this.nativeExpectedFrames;
+        break;
+    }
+  }
+
+  // ------------------------------------------------------------ persist
+
+  private persistQueue(): void {
+    this.queueDirty = true;
+    this.scheduleSave();
+  }
+
+  private recordRecent(song: Track): void {
+    this.recentTracks = [song, ...this.recentTracks.filter((item) => item.id !== song.id)].slice(0, RECENT_LIMIT);
+    void this.ctx.globalState.update(RECENT_KEY, this.recentTracks);
+  }
+
+  private persistLiked(): void {
+    void this.ctx.globalState.update(LIKED_KEY, [...this.likedIds]);
+  }
+
+  private scheduleSave(): void {
+    if (this.saveTimer) clearTimeout(this.saveTimer);
+    this.saveTimer = setTimeout(() => {
+      this.saveTimer = undefined;
+      const payload: PersistedPlayback = {
+        volume: this.volume,
+        mode: this.mode,
+        ids: this.queue.map((t) => t.id),
+        index: this.index,
+      };
+      void this.ctx.globalState.update(PLAYBACK_KEY, payload);
+      this.queueDirty = false;
+    }, 600);
+  }
+
+  dispose(): void {
+    void this.stopNative();
+    if (this.emitTimer) clearTimeout(this.emitTimer);
+    if (this.saveTimer) clearTimeout(this.saveTimer);
+    this.emitter.dispose();
+  }
+}
