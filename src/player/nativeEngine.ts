@@ -109,6 +109,41 @@ export class NativeEngineSession extends EventEmitter {
     }
   }
 
+  static async startFile(
+    binary: string,
+    filePath: string,
+    backend: "wasapi" | "asio",
+    startMs: number,
+  ): Promise<NativeEngineSession> {
+    const stat = await fs.stat(binary).catch(() => null);
+    if (!stat?.isFile()) throw new Error("原生引擎不存在：" + binary);
+    const child = spawn(
+      binary,
+      ["--play-file", filePath, "--start-ms", String(Math.max(0, Math.floor(startMs))), "--backend", backend],
+      { stdio: ["pipe", "pipe", "pipe"], windowsHide: true },
+    ) as ChildProcessWithoutNullStreams;
+    const session = new NativeEngineSession(child, binary);
+    try {
+      const readyPromise = session.waitFor("ready", 15000);
+      const configuredPromise = new Promise<any>((resolve) => session.once("configured", resolve));
+      const startedPromise = new Promise<any>((resolve) => session.once("started", resolve));
+      await readyPromise;
+      const configured = await configuredPromise;
+      await startedPromise;
+      session.ready = true;
+      session.configured = {
+        device: configured.device,
+        format: configured.format,
+        bufferFrames: Number(configured.bufferFrames ?? 0),
+        exclusive: Boolean(configured.exclusive),
+      };
+      return session;
+    } catch (err) {
+      await session.dispose();
+      throw err;
+    }
+  }
+
   private onStdout(data: Buffer): void {
     this.buffer += data.toString("utf8");
     let idx = this.buffer.indexOf("\n");

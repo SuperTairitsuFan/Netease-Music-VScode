@@ -2,7 +2,7 @@
   "name": "netease-music",
   "displayName": "网易云音乐",
   "description": "网易云音乐 for VS Code：EAPI 直连、PC 风侧边栏、歌单/歌手/搜索/评论、封面下载与原生音频输出。",
-  "version": "0.3.36",
+  "version": "0.3.38",
   "publisher": "AICis",
   "license": "MIT",
   "engines": {
@@ -645,6 +645,11 @@
           ],
           "default": "wasapi",
           "markdownDescription": "原生引擎后端。ASIO 绕过 Windows 混音器，适合 USB DAC 高采样率。"
+        },
+        "neteaseMusic.output.streaming": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "原生流式解码：引擎直接读缓存文件逐帧解码播放，首帧即播。"
         }
       }
     }

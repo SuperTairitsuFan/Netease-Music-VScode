@@ -20,6 +20,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
+import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -73,6 +74,10 @@ function walk(dir, out = []) {
 }
 
 const files = walk(root).sort((a, b) => a.rel.localeCompare(b.rel));
+
+function gitBlobSha(content) {
+  return crypto.createHash("sha1").update(`blob ${content.length}\0`).update(content).digest("hex");
+}
 const vsix = path.join(root, "dist-vsix", `netease-music-${pkg.version}-win32-x64.vsix`);
 
 if (dryRun) {
@@ -152,24 +157,6 @@ async function main() {
     console.log(`[github] created ${repo.html_url}`);
   }
 
-  console.log(`[github] uploading ${files.length} files...`);
-  const blobs = [];
-  for (const file of files) {
-    const content = fs.readFileSync(file.full).toString("base64");
-    const blob = await api(`https://api.github.com/repos/${owner}/${repoName}/git/blobs`, {
-      method: "POST",
-      body: JSON.stringify({ content, encoding: "base64" }),
-    });
-    blobs.push({ path: file.rel, mode: "100644", type: "blob", sha: blob.sha });
-    process.stdout.write(`\r  ${blobs.length}/${files.length}`);
-  }
-  process.stdout.write("\n");
-
-  const tree = await api(`https://api.github.com/repos/${owner}/${repoName}/git/trees`, {
-    method: "POST",
-    body: JSON.stringify({ tree: blobs }),
-  });
-
   let parent;
   try {
     const ref = await api(`https://api.github.com/repos/${owner}/${repoName}/git/ref/heads/main`);
@@ -177,6 +164,39 @@ async function main() {
   } catch (error) {
     if (!String(error).includes("404")) throw error;
   }
+
+  // Reuse blobs that already exist in the parent tree so only changed files are uploaded.
+  const existing = new Map();
+  if (parent) {
+    const commit = await api(`https://api.github.com/repos/${owner}/${repoName}/git/commits/${parent}`);
+    const base = await api(`https://api.github.com/repos/${owner}/${repoName}/git/trees/${commit.tree.sha}?recursive=1`);
+    for (const entry of base.tree ?? []) if (entry.type === "blob") existing.set(entry.path, entry.sha);
+  }
+
+  console.log(`[github] uploading ${files.length} files...`);
+  const blobs = [];
+  let uploaded = 0;
+  for (const file of files) {
+    const content = fs.readFileSync(file.full);
+    const sha = gitBlobSha(content);
+    if (existing.get(file.rel) === sha) {
+      blobs.push({ path: file.rel, mode: "100644", type: "blob", sha });
+    } else {
+      const blob = await api(`https://api.github.com/repos/${owner}/${repoName}/git/blobs`, {
+        method: "POST",
+        body: JSON.stringify({ content: content.toString("base64"), encoding: "base64" }),
+      });
+      blobs.push({ path: file.rel, mode: "100644", type: "blob", sha: blob.sha });
+      uploaded += 1;
+    }
+    process.stdout.write(`\r  ${blobs.length}/${files.length} (uploaded ${uploaded})`);
+  }
+  process.stdout.write("\n");
+
+  const tree = await api(`https://api.github.com/repos/${owner}/${repoName}/git/trees`, {
+    method: "POST",
+    body: JSON.stringify({ tree: blobs }),
+  });
 
   const commit = await api(`https://api.github.com/repos/${owner}/${repoName}/git/commits`, {
     method: "POST",

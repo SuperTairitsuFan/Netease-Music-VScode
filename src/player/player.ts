@@ -69,6 +69,7 @@ export class PlayerService implements vscode.Disposable {
   private nativeBeginChain: Promise<void> = Promise.resolve();
   private nativeBeginToken = 0;
   private nativeRetry = 0;
+  private streamNative = false;
   private lastEmit = 0;
   private emitTimer: NodeJS.Timeout | undefined;
   private saveTimer: NodeJS.Timeout | undefined;
@@ -437,8 +438,16 @@ export class PlayerService implements vscode.Disposable {
     if (this.playing) {
       this.playing = false;
       this.post({ type: "control", action: "pause" });
-      this.nativeSession?.pause().catch(() => undefined);
+      if (this.streamNative) {
+        void this.stopNative();
+      } else {
+        this.nativeSession?.pause().catch(() => undefined);
+      }
       this.emit();
+      return;
+    }
+    if (this.streamNative && this.currentSong) {
+      void this.start(this.currentSong, this.position);
       return;
     }
     if (this.nativeSession) {
@@ -690,6 +699,17 @@ export class PlayerService implements vscode.Disposable {
         try {
           const filePath = await this.ensureAudioFile(song, resolved, token);
           if (token !== this.playToken) return;
+          const backendName = this.getConfig().output.backend === "asio" ? "asio" : "wasapi";
+          if (this.getConfig().output.streaming) {
+            try {
+              const streamRecord = await this.components.nativeRecord();
+              if (!streamRecord?.entryPath) throw new Error("原生引擎组件不存在");
+              await this.startStreamNative(streamRecord.entryPath, filePath, backendName, position);
+              return;
+            } catch (err) {
+              log.warn("native streaming failed, using webview decode", (err as Error).message);
+            }
+          }
           const localUri = this.resourceUriFn?.(filePath) ?? "";
           const request: LoadRequest = {
             song,
@@ -824,6 +844,46 @@ export class PlayerService implements vscode.Disposable {
   }
 
   // --------------------------------------------------------- native path
+
+  private async startStreamNative(
+    entryPath: string,
+    filePath: string,
+    backend: "wasapi" | "asio",
+    position: number,
+  ): Promise<void> {
+    await this.stopNative();
+    const session = await NativeEngineSession.startFile(entryPath, filePath, backend, position * 1000);
+    this.streamNative = true;
+    this.nativeSession = session;
+    const streamFormat = session.configured?.format;
+    this.nativeRate = Number(streamFormat?.sampleRate ?? 0);
+    if (streamFormat) {
+      this.output = {
+        kind: "native",
+        label: `Native Engine · ${streamFormat.sampleRate} Hz / ${streamFormat.bits} bit`,
+        detail: `${backend === "asio" ? "ASIO" : "WASAPI"} 流式解码 · ${streamFormat.sampleFormat}`,
+        backend,
+      };
+    }
+    this.nativeStartPosition = position;
+    this.nativeSongId = this.currentSong?.id ?? 0;
+    this.nativeExpectedFrames = 0;
+    this.finishedNative = false;
+    this.mediaLoaded = true;
+    this.loading = false;
+    this.preparing = 100;
+    this.playing = true;
+    this.position = position;
+    this.nativeWriteChain = Promise.resolve();
+    session.on("log", (line) => log.warn("native stderr", line));
+    session.on("engineError", (err: Error) => log.warn("native engine error", err.message));
+    session.on("progress", (p: any) => this.onNativeProgress(p));
+    session.on("drained", () => void this.finishNative());
+    session.on("closed", () => {
+      if (this.nativeSession === session) this.nativeSession = undefined;
+    });
+    this.emit();
+  }
 
   private async handleNativeBegin(
     msg: Extract<WebviewMessage, { type: "nativeBegin" }>,
@@ -1001,6 +1061,7 @@ export class PlayerService implements vscode.Disposable {
   }
 
   private async stopNative(): Promise<void> {
+    this.streamNative = false;
     const session = this.nativeSession;
     this.nativeSession = undefined;
     this.nativeRate = 0;

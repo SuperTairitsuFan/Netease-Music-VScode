@@ -147,6 +147,8 @@ static void out_init(void) {
   }
 }
 
+int naoe_play_file(const char *path, const char *backend_name, int start_ms);
+
 static void send_line(const char *line) {
   out_init();
   mutex_lock(&g_out_mutex);
@@ -633,6 +635,8 @@ int main(int argc, char **argv) {
   const char *backend_name = getenv("NAOE_BACKEND");
   int mode_probe = 0;
   int mode_serve = 0;
+  const char *play_file = NULL;
+  int start_ms = 0;
   for (int i = 1; i < argc; i++) {
     if (strcmp(argv[i], "--probe") == 0) mode_probe = 1;
     else if (strcmp(argv[i], "--serve") == 0) mode_serve = 1;
@@ -641,7 +645,11 @@ int main(int argc, char **argv) {
       return 0;
     } else if (strcmp(argv[i], "--backend") == 0 && i + 1 < argc) backend_name = argv[++i];
     else if (strncmp(argv[i], "--backend=", 10) == 0) backend_name = argv[i] + 10;
+    else if (strcmp(argv[i], "--play-file") == 0 && i + 1 < argc) play_file = argv[++i];
+    else if (strcmp(argv[i], "--start-ms") == 0 && i + 1 < argc) start_ms = atoi(argv[++i]);
   }
+
+  if (play_file) return naoe_play_file(play_file, backend_name, start_ms);
 
   const NaoeBackend *backend = NULL;
   if (naoe_backend_select(backend_name, &backend) != 0) {
