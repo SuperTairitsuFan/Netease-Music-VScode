@@ -147,7 +147,7 @@ static void out_init(void) {
   }
 }
 
-int naoe_play_file(const char *path, const char *backend_name, int start_ms);
+int naoe_play_file(const char *path, const char *backend_name, int start_ms, int growing, const char *done_path, int exclusive, int bits, const char *device);
 
 static void send_line(const char *line) {
   out_init();
@@ -636,7 +636,12 @@ int main(int argc, char **argv) {
   int mode_probe = 0;
   int mode_serve = 0;
   const char *play_file = NULL;
+  const char *done_path = NULL;
+  int growing = 0;
   int start_ms = 0;
+  int play_exclusive = 1;
+  int play_bits = 32;
+  const char *play_device = "default";
   for (int i = 1; i < argc; i++) {
     if (strcmp(argv[i], "--probe") == 0) mode_probe = 1;
     else if (strcmp(argv[i], "--serve") == 0) mode_serve = 1;
@@ -647,9 +652,14 @@ int main(int argc, char **argv) {
     else if (strncmp(argv[i], "--backend=", 10) == 0) backend_name = argv[i] + 10;
     else if (strcmp(argv[i], "--play-file") == 0 && i + 1 < argc) play_file = argv[++i];
     else if (strcmp(argv[i], "--start-ms") == 0 && i + 1 < argc) start_ms = atoi(argv[++i]);
+    else if (strcmp(argv[i], "--growing") == 0) growing = 1;
+    else if (strcmp(argv[i], "--done") == 0 && i + 1 < argc) done_path = argv[++i];
+    else if (strcmp(argv[i], "--exclusive") == 0 && i + 1 < argc) play_exclusive = atoi(argv[++i]);
+    else if (strcmp(argv[i], "--bits") == 0 && i + 1 < argc) play_bits = atoi(argv[++i]);
+    else if (strcmp(argv[i], "--device") == 0 && i + 1 < argc) play_device = argv[++i];
   }
 
-  if (play_file) return naoe_play_file(play_file, backend_name, start_ms);
+  if (play_file) return naoe_play_file(play_file, backend_name, start_ms, growing, done_path, play_exclusive, play_bits, play_device);
 
   const NaoeBackend *backend = NULL;
   if (naoe_backend_select(backend_name, &backend) != 0) {

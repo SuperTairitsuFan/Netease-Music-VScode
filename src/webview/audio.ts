@@ -74,6 +74,7 @@ export class AudioEngine {
         break;
       case "play":
         this.nativePaused = false;
+        this.audio.muted = false;
         void this.audio.play().catch((err: Error) => {
           this.send({ type: "loadError", message: `无法恢复播放：${err.message}` });
         });
@@ -140,13 +141,38 @@ export class AudioEngine {
 
   // ------------------------------------------------------------- internals
 
+  private async applyPreferredSink(): Promise<void> {
+    const media = navigator.mediaDevices;
+    if (!media?.enumerateDevices || !("setSinkId" in HTMLMediaElement.prototype)) return;
+    try {
+      const devices = await media.enumerateDevices();
+      const target = devices.find(
+        (device) =>
+          device.kind === "audiooutput" &&
+          device.deviceId &&
+          /TOPPING|USB DAC|USB Audio/i.test(device.label),
+      );
+      if (!target) return;
+      const current = (this.audio as HTMLAudioElement & { sinkId?: string }).sinkId;
+      if (current !== target.deviceId) {
+        await (this.audio as HTMLAudioElement & { setSinkId(id: string): Promise<void> })
+          .setSinkId(target.deviceId)
+          .catch(() => undefined);
+      }
+    } catch {
+      /* sink selection is best-effort */
+    }
+  }
+
   private playElement(request: LoadRequest): void {
     if (!request.url) {
       this.send({ type: "loadError", message: "缺少播放地址" });
       return;
     }
     this.audio.src = request.url;
+    this.audio.muted = false;
     this.audio.volume = clamp(request.volume, 0, 1);
+    void this.applyPreferredSink();
     this.audio.playbackRate = this.rate;
     const apply = () => {
       try {

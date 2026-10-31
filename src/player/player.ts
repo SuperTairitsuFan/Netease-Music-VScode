@@ -7,7 +7,7 @@ import type { MusicConfig, PlayMode, Quality } from "../config";
 import { QUALITY_LABELS } from "../config";
 import type { LyricPayload, SongUrlResult, Track } from "../api/types";
 import type { HostMessage, LoadRequest, NativeFormatView, OutputView, PlayerState, WebviewMessage } from "../protocol";
-import { downloadToFile } from "../download/fetcher";
+import { downloadToFile, downloadToGrowingFile } from "../download/fetcher";
 import { log } from "../util/logger";
 import type { AudioFormat, ComponentStore } from "./components";
 import { EngineError, NativeEngineSession } from "./nativeEngine";
@@ -70,6 +70,13 @@ export class PlayerService implements vscode.Disposable {
   private nativeBeginToken = 0;
   private nativeRetry = 0;
   private streamNative = false;
+  private preload?: { songId: number; quality: string; filePath: string; resolved: SongUrlResult };
+  private preloadPromise?: Promise<void>;
+  private preloadingSongId = 0;
+  private growing?: { finalPath: string; partPath: string; donePath: string; promise: Promise<void> };
+  private keepGrowing = false;
+  private cachedWebAudio = false;
+  private webAudioRetried = false;
   private lastEmit = 0;
   private emitTimer: NodeJS.Timeout | undefined;
   private saveTimer: NodeJS.Timeout | undefined;
@@ -223,6 +230,16 @@ export class PlayerService implements vscode.Disposable {
     const cfg = this.getConfig();
     const record = await this.components.nativeRecord();
     const ready = record?.status === "ready";
+    const wantNative = cfg.output.bitPerfect || cfg.output.mode === "native";
+    if (this.nativeSession && !wantNative) {
+      const song = this.currentSong;
+      const resumeAt = this.position;
+      const wasPlaying = this.playing;
+      await this.stopNative();
+      this.mediaLoaded = false;
+      this.playing = false;
+      if (song && wasPlaying) void this.start(song, resumeAt);
+    }
     if (this.nativeSession) {
       this.emit();
       return;
@@ -491,6 +508,19 @@ export class PlayerService implements vscode.Disposable {
     const target = Math.max(0, Math.min(seconds, this.duration || seconds));
     this.position = target;
     if (this.nativeSession) {
+      // Seeking inside a still-downloading stream needs the bytes at the target.
+      // Wait for the download to finish (UI shows preparing %) instead of
+      // starting a second download that would delete the growing file.
+      if (this.growing) {
+        this.loading = true;
+        this.emit();
+        const done = await fs.readFile(this.growing.donePath, "utf8").catch(() => "");
+        if (done.trim() === "done") {
+          this.finalizeGrowing();
+        } else {
+          this.keepGrowing = true;
+        }
+      }
       await this.startNativePlayback(this.currentSong, target);
       return;
     }
@@ -650,6 +680,8 @@ export class PlayerService implements vscode.Disposable {
     this.lastTimeAt = Date.now();
     if (!keepStallRetry) this.stallRetried = false;
     this.error = null;
+    this.cachedWebAudio = false;
+    this.webAudioRetried = false;
     this.preparing = 0;
     this.actualQuality = "";
     this.trialEnd = 0;
@@ -684,8 +716,33 @@ export class PlayerService implements vscode.Disposable {
 
     void this.loadLyric(song);
 
+    const timingStart = Date.now();
     try {
-      const resolved = await this.resolveUrl(song);
+      const cachedAudio = await this.findCachedAudio(song);
+      if (cachedAudio) {
+        const useNativeCached = await this.shouldUseNative();
+        this.currentResolved = null;
+        this.actualQuality = "cache";
+        if (useNativeCached) {
+          const record = await this.components.nativeRecord();
+          if (!record?.entryPath) throw new Error("原生引擎组件不存在");
+          const backendName = this.getConfig().output.backend === "asio" ? "asio" : "wasapi";
+          this.loading = false;
+          this.playing = true;
+          this.mediaLoaded = true;
+          await this.startStreamNative(record.entryPath, cachedAudio, backendName, position);
+          log.info("startup timing", { resolve: 0, total: Date.now() - timingStart, cached: true });
+          return;
+        }
+        // WebAudio 不使用本地缓存：部分 webview 的 <audio> 不支持本地
+        // FLAC/高采样率容器，继续走 EAPI 远程流更可靠。
+      }
+      if (this.preloadingSongId === song.id && this.preloadPromise) await this.preloadPromise;
+      const cachedPreload =
+        this.preload && this.preload.songId === song.id && this.preload.quality === this.getConfig().quality
+          ? this.preload
+          : undefined;
+      const resolved = cachedPreload?.resolved ?? (await this.resolveUrl(song));
       if (token !== this.playToken) return;
       if (!resolved.url) throw new Error(resolved.code === 404 ? "该歌曲无版权或已下架" : "无法获取播放地址");
       this.currentResolved = resolved;
@@ -693,18 +750,25 @@ export class PlayerService implements vscode.Disposable {
       this.trialEnd = resolved.freeTrialInfo?.end ?? 0;
       if (resolved.sampleRate) this.duration = this.duration || song.duration / 1000;
 
+      const resolvedAt = Date.now();
       const useNative = await this.shouldUseNative();
       if (token !== this.playToken) return;
       if (useNative) {
         try {
-          const filePath = await this.ensureAudioFile(song, resolved, token);
+          const filePath = cachedPreload
+            ? cachedPreload.filePath
+            : await this.ensureStreamingFile(song, resolved, token);
+          if (cachedPreload) this.preload = undefined;
           if (token !== this.playToken) return;
           const backendName = this.getConfig().output.backend === "asio" ? "asio" : "wasapi";
           if (this.getConfig().output.streaming) {
             try {
               const streamRecord = await this.components.nativeRecord();
               if (!streamRecord?.entryPath) throw new Error("原生引擎组件不存在");
-              await this.startStreamNative(streamRecord.entryPath, filePath, backendName, position);
+              const growing = Boolean(this.growing && filePath.endsWith(".part"));
+              const donePath = growing ? this.growing?.donePath ?? "" : "";
+              await this.startStreamNative(streamRecord.entryPath, filePath, backendName, position, growing, donePath);
+              log.info("startup timing", { resolve: resolvedAt - timingStart, total: Date.now() - timingStart, preloaded: Boolean(cachedPreload) });
               return;
             } catch (err) {
               log.warn("native streaming failed, using webview decode", (err as Error).message);
@@ -787,9 +851,10 @@ export class PlayerService implements vscode.Disposable {
     return 16;
   }
 
-  private async resolveUrl(song: Track): Promise<SongUrlResult> {
+  private async resolveUrl(song: Track, force = false): Promise<SongUrlResult> {
     const cfg = this.getConfig();
     const key = `${song.id}:${cfg.quality}`;
+    if (force) this.urlCache.delete(key);
     const cached = this.urlCache.get(key);
     if (cached && cached.expiresAt > Date.now() && cached.value.url) return cached.value;
     const value = await this.session.client.songUrl(song.id, cfg.quality);
@@ -798,7 +863,35 @@ export class PlayerService implements vscode.Disposable {
     return value;
   }
 
-  private async ensureAudioFile(song: Track, resolved: SongUrlResult, token: number): Promise<string> {
+  private async findCachedAudio(song: Track): Promise<string | undefined> {
+    const cfg = this.getConfig();
+    const dir = cfg.cache.enabled
+      ? cfg.cache.dir || path.join(this.ctx.globalStorageUri.fsPath, "cache", "audio")
+      : path.join(this.ctx.globalStorageUri.fsPath, "cache", "audio");
+    const prefix = `${song.id}-${cfg.quality}-`;
+    let names: string[];
+    try {
+      names = await fs.readdir(dir);
+    } catch {
+      return undefined;
+    }
+    for (const name of names) {
+      if (!name.startsWith(prefix)) continue;
+      if (name.endsWith(".part") || name.endsWith(".done")) continue;
+      if (!/\.(flac|mp3)$/i.test(name)) continue;
+      const full = path.join(dir, name);
+      const stat = await fs.stat(full).catch(() => null);
+      if (stat?.isFile() && stat.size > 1024) return full;
+    }
+    return undefined;
+  }
+
+  private async ensureAudioFile(
+    song: Track,
+    resolved: SongUrlResult,
+    token: number,
+    background = false,
+  ): Promise<string> {
     if (!resolved.url) throw new Error("播放地址为空");
     const cfg = this.getConfig();
     const ext = resolved.type === "flac" ? "flac" : "mp3";
@@ -808,12 +901,14 @@ export class PlayerService implements vscode.Disposable {
     const file = path.join(dir, `${song.id}-${cfg.quality}-${resolved.br}.${ext}`);
     const stat = await fs.stat(file).catch(() => null);
     if (stat?.isFile() && stat.size > 1024) return file;
-    this.preparing = 1;
-    this.emit();
+    if (!background) {
+      this.preparing = 1;
+      this.emit();
+    }
     let last = 0;
     await downloadToFile(resolved.url, file, {
       onProgress: (p) => {
-        if (token !== this.playToken) return;
+        if (background || token !== this.playToken) return;
         const now = Date.now();
         if (now - last > 200) {
           last = now;
@@ -850,10 +945,28 @@ export class PlayerService implements vscode.Disposable {
     filePath: string,
     backend: "wasapi" | "asio",
     position: number,
+    growing = false,
+    donePath = "",
   ): Promise<void> {
+    const growingState = this.growing;
+    this.growing = undefined;
     await this.stopNative();
-    const session = await NativeEngineSession.startFile(entryPath, filePath, backend, position * 1000);
+    this.growing = growingState;
+    const cfg = this.getConfig();
+    const exclusive = backend === "asio" ? true : cfg.output.bitPerfect || cfg.output.exclusive;
+    const bits = backend === "asio" ? 32 : exclusive ? 32 : 16;
+    const device = backend === "asio" ? "default" : cfg.output.device || "default";
+    const session = await NativeEngineSession.startFile(
+      entryPath,
+      filePath,
+      backend,
+      position * 1000,
+      growing,
+      donePath,
+      { exclusive, bits, device },
+    );
     this.streamNative = true;
+    this.keepGrowing = false;
     this.nativeSession = session;
     const streamFormat = session.configured?.format;
     this.nativeRate = Number(streamFormat?.sampleRate ?? 0);
@@ -877,12 +990,105 @@ export class PlayerService implements vscode.Disposable {
     this.nativeWriteChain = Promise.resolve();
     session.on("log", (line) => log.warn("native stderr", line));
     session.on("engineError", (err: Error) => log.warn("native engine error", err.message));
-    session.on("progress", (p: any) => this.onNativeProgress(p));
-    session.on("drained", () => void this.finishNative());
+    session.on("progress", (p: any) => {
+      if (this.nativeSession !== session) return;
+      this.onNativeProgress(p);
+    });
+    session.on("drained", () => {
+      if (this.nativeSession !== session) return;
+      void this.finishNative();
+    });
     session.on("closed", () => {
       if (this.nativeSession === session) this.nativeSession = undefined;
     });
     this.emit();
+    void this.maybePreloadNext(true);
+  }
+
+  private cachePaths(song: Track, resolved: SongUrlResult): { finalPath: string; partPath: string; donePath: string } {
+    const cfg = this.getConfig();
+    const ext = resolved.type === "flac" ? "flac" : "mp3";
+    const dir = cfg.cache.enabled
+      ? cfg.cache.dir || path.join(this.ctx.globalStorageUri.fsPath, "cache", "audio")
+      : path.join(this.ctx.globalStorageUri.fsPath, "cache", "audio");
+    const finalPath = path.join(dir, `${song.id}-${cfg.quality}-${resolved.br}.${ext}`);
+    return { finalPath, partPath: finalPath + ".part", donePath: finalPath + ".done" };
+  }
+
+  private async ensureStreamingFile(song: Track, resolved: SongUrlResult, token: number): Promise<string> {
+    const { finalPath, partPath, donePath } = this.cachePaths(song, resolved);
+    const stat = await fs.stat(finalPath).catch(() => null);
+    if (this.growing && this.growing.partPath === partPath) return partPath;
+    if (stat?.isFile() && stat.size > 1024) return finalPath;
+    if (resolved.type !== "flac") return this.ensureAudioFile(song, resolved, token);
+    await fs.rm(donePath, { force: true }).catch(() => undefined);
+    await fs.rm(partPath, { force: true }).catch(() => undefined);
+    const promise = downloadToGrowingFile(resolved.url!, partPath, donePath, {
+      onProgress: (p) => {
+        if (token !== this.playToken) return;
+        this.preparing = p.total ? Math.min(99, Math.round((p.received / p.total) * 100)) : 0;
+        this.emit(false);
+      },
+    })
+      .then(() => undefined)
+      .catch((err) => log.warn("growing download failed", (err as Error).message));
+    this.growing = { finalPath, partPath, donePath, promise };
+    for (let i = 0; i < 150; i += 1) {
+      const size = await fs.stat(partPath).then((s) => s.size).catch(() => 0);
+      if (size > 256 * 1024) break;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    const doneState = await fs.readFile(donePath, "utf8").catch(() => "");
+    if (doneState.trim() === "error") throw new Error("缓存下载失败");
+    return partPath;
+  }
+
+  private finalizeGrowing(): void {
+    const g = this.growing;
+    if (!g) return;
+    this.growing = undefined;
+    void (async () => {
+      const done = await fs.readFile(g.donePath, "utf8").catch(() => "");
+      if (done.trim() === "done") {
+        await fs.rename(g.partPath, g.finalPath).catch(() => undefined);
+      }
+      await fs.rm(g.donePath, { force: true }).catch(() => undefined);
+    })();
+  }
+
+  private peekNextIndex(): number {
+    if (!this.queue.length) return -1;
+    if (this.mode === "shuffle" || this.mode === "repeatOne") return -1;
+    let next = this.index + 1;
+    if (next >= this.queue.length) {
+      if (this.mode === "repeat") next = 0;
+      else return -1;
+    }
+    return next;
+  }
+
+  private maybePreloadNext(force = false): void {
+    if (!this.duration || this.loading) return;
+    if (!force && this.duration - this.position > 20) return;
+    if (this.preload || this.preloadPromise) return;
+    const nextIndex = this.peekNextIndex();
+    if (nextIndex < 0 || nextIndex === this.index) return;
+    const song = this.queue[nextIndex];
+    if (!song || song.localPath) return;
+    const quality = this.getConfig().quality;
+    this.preloadingSongId = song.id;
+    this.preloadPromise = (async () => {
+      const resolved = await this.resolveUrl(song);
+      if (!resolved.url) return;
+      const filePath = await this.ensureAudioFile(song, resolved, this.playToken, true);
+      this.preload = { songId: song.id, quality, filePath, resolved };
+      log.info("preloaded next", { id: song.id, file: filePath });
+    })()
+      .catch((err) => log.warn("preload failed", (err as Error).message))
+      .finally(() => {
+        this.preloadPromise = undefined;
+        this.preloadingSongId = 0;
+      });
   }
 
   private async handleNativeBegin(
@@ -1043,6 +1249,7 @@ export class PlayerService implements vscode.Disposable {
     this.nativeReceivedFrames = frames;
     this.position = this.nativeStartPosition + frames / this.nativeRate;
     if (this.duration && this.position > this.duration) this.position = this.duration;
+    void this.maybePreloadNext();
     if (this.nativeExpectedFrames && frames >= this.nativeExpectedFrames) {
       void this.finishNative();
       return;
@@ -1052,6 +1259,16 @@ export class PlayerService implements vscode.Disposable {
 
   private async finishNative(): Promise<void> {
     if (this.finishedNative) return;
+    if (this.nativeReceivedFrames === 0 && this.duration > 2 && this.position < this.duration - 1) {
+      log.warn("native ended without frames", { id: this.nativeSongId });
+      this.finishedNative = true;
+      await this.stopNative();
+      this.playing = false;
+      this.loading = false;
+      this.error = "原生输出没有产生音频帧";
+      this.emit();
+      return;
+    }
     this.finishedNative = true;
     await this.stopNative();
     this.playing = false;
@@ -1061,6 +1278,7 @@ export class PlayerService implements vscode.Disposable {
   }
 
   private async stopNative(): Promise<void> {
+    if (!this.keepGrowing) this.finalizeGrowing();
     this.streamNative = false;
     const session = this.nativeSession;
     this.nativeSession = undefined;
@@ -1088,6 +1306,7 @@ export class PlayerService implements vscode.Disposable {
         this.buffered = Math.max(this.position, msg.buffered ?? 0);
         if (msg.duration) this.duration = msg.duration;
         if (!this.playing && !this.loading) this.playing = true;
+        void this.maybePreloadNext();
         this.emit(false);
         break;
       case "ended":
@@ -1096,14 +1315,41 @@ export class PlayerService implements vscode.Disposable {
         this.emit();
         await this.next();
         break;
-      case "loadError":
+      case "loadError": {
         log.warn("audio load error", msg.message);
+        if (!this.webAudioRetried && this.currentSong) {
+          this.webAudioRetried = true;
+          try {
+            const resolved = await this.resolveUrl(this.currentSong, true);
+            if (resolved.url) {
+              log.info("webaudio retry with fresh url", { type: resolved.type });
+              this.loading = true;
+              this.playing = true;
+              this.emit();
+              this.post({
+                type: "load",
+                request: {
+                  song: this.currentSong,
+                  url: resolved.url,
+                  native: false,
+                  position: this.position,
+                  volume: this.volume,
+                  duration: this.duration,
+                },
+              });
+              break;
+            }
+          } catch (err) {
+            log.warn("webaudio fresh url failed", (err as Error).message);
+          }
+        }
         this.mediaLoaded = false;
         this.loading = false;
         this.playing = false;
         this.error = msg.message;
         this.emit();
         break;
+      }
       case "decodeError":
         if (this.nativeSession) break;
         this.post({ type: "playerError", message: msg.message });

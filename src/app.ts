@@ -368,6 +368,7 @@ export class App implements vscode.Disposable {
   private settingsView(): SettingsView {
     const cfg = getConfig();
     return {
+      version: String(this.ctx.extension.packageJSON.version ?? "0.0.0"),
       quality: cfg.quality,
       downloadQuality: cfg.download.quality === "auto" ? "auto" : QUALITY_LABELS[cfg.download.quality] ?? cfg.download.quality,
       downloadDir: this.downloads.dir,
@@ -892,6 +893,9 @@ export class App implements vscode.Disposable {
         break;
       case "probeAudio":
         await this.probeAudio(true);
+        break;
+      case "restartApp":
+        this.restartApp();
         break;
       case "selectDevice":
         await this.selectDevice();
@@ -1854,6 +1858,17 @@ export class App implements vscode.Disposable {
     return status;
   }
 
+  private restartApp(): void {
+    const exe = process.execPath;
+    try {
+      const child = spawn(exe, ["--reuse-window"], { detached: true, stdio: "ignore" });
+      child.unref();
+    } catch {
+      /* fall through to quit */
+    }
+    void vscode.commands.executeCommand("workbench.action.quit");
+  }
+
   private async probeAudio(announce: boolean): Promise<EngineProbe> {
     const record = await this.components.nativeRecord();
     if (!record?.entryPath || record.status !== "ready") {
@@ -2305,7 +2320,11 @@ export class App implements vscode.Disposable {
     this.status.queue.show();
     this.status.settings.show();
     this.status.play.text = state.loading ? "$(loading~spin)" : state.playing ? "$(debug-pause)" : "$(play)";
-    this.status.play.tooltip = state.playing ? "暂停" : state.loading ? "缓冲中…" : "播放";
+    this.status.play.tooltip = state.playing
+      ? "暂停"
+      : state.loading
+        ? `缓冲中…${state.preparing ? ` ${state.preparing}%` : ""}`
+        : "播放";
     const artists = track.artists.map((artist) => artist.name).join(" / ");
     const full = `${track.name}${artists ? ` — ${artists}` : ""}`;
     if (full !== this.lastTitle) {

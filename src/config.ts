@@ -57,7 +57,7 @@ export const QUALITY_OPTIONS: QualityOption[] = [
     label: "标准",
     short: "标准",
     tier: "free",
-    description: "128 kbps · 节省流量",
+    description: "128 kbps · MP3 · 44.1 kHz · 16-bit · 节省流量",
     levels: ["standard", "higher"],
   },
   {
@@ -65,7 +65,7 @@ export const QUALITY_OPTIONS: QualityOption[] = [
     label: "极高",
     short: "极高",
     tier: "vip",
-    description: "320 kbps · VIP",
+    description: "320 kbps · MP3 · 44.1 kHz · 16-bit · VIP",
     levels: ["exhigh", "higher", "standard"],
   },
   {
@@ -73,7 +73,7 @@ export const QUALITY_OPTIONS: QualityOption[] = [
     label: "无损",
     short: "无损",
     tier: "vip",
-    description: "FLAC 无损 · VIP",
+    description: "FLAC 无损 · 44.1/48 kHz · 16-bit · 约 900–1100 kbps · VIP",
     levels: ["lossless", "exhigh"],
   },
   {
@@ -81,7 +81,7 @@ export const QUALITY_OPTIONS: QualityOption[] = [
     label: "高解析度无损",
     short: "Hi-Res",
     tier: "vip",
-    description: "Hi-Res 高解析度 · VIP",
+    description: "Hi-Res FLAC · 48–192 kHz · 24-bit · 最高约 4600 kbps · VIP",
     levels: ["hires", "lossless"],
   },
   {
@@ -89,23 +89,15 @@ export const QUALITY_OPTIONS: QualityOption[] = [
     label: "高清臻音",
     short: "臻音",
     tier: "svip",
-    description: "高清臻音 · SVIP",
+    description: "高清臻音 · 48–192 kHz · 24-bit · SVIP",
     levels: ["jyeffect", "hires"],
-  },
-  {
-    key: "sky",
-    label: "沉浸环绕声",
-    short: "环绕",
-    tier: "svip",
-    description: "沉浸环绕声 · SVIP",
-    levels: ["sky", "jyeffect"],
   },
   {
     key: "jymaster",
     label: "超清母带",
     short: "母带",
     tier: "svip",
-    description: "超清母带 · SVIP",
+    description: "超清母带 · 48–192 kHz · 24-bit · 最高约 4600 kbps · SVIP",
     levels: ["jymaster", "hires"],
   },
 ];
@@ -140,6 +132,7 @@ export const SONG_LEVEL_LABELS: Record<string, string> = {
 export function normalizeQuality(value: string | undefined): Quality {
   if (value && QUALITY_ORDER.includes(value as Quality)) return value as Quality;
   if (value === "higher") return "exhigh";
+  if (value === "sky") return "jymaster";
   return "exhigh";
 }
 

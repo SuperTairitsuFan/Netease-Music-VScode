@@ -64,6 +64,7 @@ export interface PlayerState {
 }
 
 export interface SettingsView {
+  version: string;
   quality: Quality;
   downloadQuality: string;
   downloadDir: string;
@@ -361,6 +362,7 @@ export type HostMessage =
 
 export type WebviewCommand =
   | "ready"
+  | "restartApp"
   | "nav"
   | "openPlaylist"
   | "openSongDetail"

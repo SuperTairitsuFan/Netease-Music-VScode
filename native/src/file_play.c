@@ -5,6 +5,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+#if defined(_WIN32)
+#include <windows.h>
+#endif
+
 #define DR_FLAC_IMPLEMENTATION
 #define DR_MP3_IMPLEMENTATION
 #define DR_FLAC_NO_OGG
@@ -22,7 +26,50 @@ static int ends_with(const char *s, const char *suffix) {
   return n >= m && _stricmp(s + n - m, suffix) == 0;
 }
 
-int naoe_play_file(const char *path, const char *backend_name, int start_ms) {
+typedef struct {
+  FILE *file;
+  const char *done_path;
+} GrowFile;
+
+static int done_exists(const char *path) {
+#if defined(_WIN32)
+  return path && GetFileAttributesA(path) != INVALID_FILE_ATTRIBUTES;
+#else
+  (void)path;
+  return 1;
+#endif
+}
+
+static size_t grow_read(void *user, void *out, size_t bytes) {
+  GrowFile *g = (GrowFile *)user;
+  for (;;) {
+    size_t got = fread(out, 1, bytes, g->file);
+    if (got > 0) return got;
+    if (done_exists(g->done_path)) return 0;
+    clearerr(g->file);
+#if defined(_WIN32)
+    Sleep(10);
+#else
+    naoe_sleep_ms(10);
+#endif
+  }
+}
+
+static drflac_bool32 grow_seek(void *user, int offset, drflac_seek_origin origin) {
+  GrowFile *g = (GrowFile *)user;
+  int whence = origin == DRFLAC_SEEK_SET ? SEEK_SET : origin == DRFLAC_SEEK_CUR ? SEEK_CUR : SEEK_END;
+  return fseek(g->file, offset, whence) == 0 ? DRFLAC_TRUE : DRFLAC_FALSE;
+}
+
+static drflac_bool32 grow_tell(void *user, drflac_int64 *cursor) {
+  GrowFile *g = (GrowFile *)user;
+  long pos = ftell(g->file);
+  if (pos < 0) return DRFLAC_FALSE;
+  *cursor = (drflac_int64)pos;
+  return DRFLAC_TRUE;
+}
+
+int naoe_play_file(const char *path, const char *backend_name, int start_ms, int growing, const char *done_path, int exclusive, int bits, const char *device) {
   const NaoeBackend *backend = NULL;
   if (naoe_backend_select(backend_name, &backend) != 0) {
     emit_line("{\"event\":\"error\",\"code\":\"BAD_BACKEND\",\"message\":\"unknown backend\"}");
@@ -43,7 +90,27 @@ int naoe_play_file(const char *path, const char *backend_name, int start_ms) {
     channels = (int)mp3.channels;
     total = drmp3_get_pcm_frame_count(&mp3);
   } else {
-    flac = drflac_open_file(path, NULL);
+    if (growing) {
+      GrowFile *g = (GrowFile *)calloc(1, sizeof(GrowFile));
+      g->done_path = done_path;
+      for (int attempt = 0; attempt < 500 && !g->file; attempt++) {
+        g->file = fopen(path, "rb");
+        if (!g->file) {
+#if defined(_WIN32)
+          Sleep(10);
+#else
+          naoe_sleep_ms(10);
+#endif
+        }
+      }
+      if (g->file) flac = drflac_open(grow_read, grow_seek, grow_tell, g, NULL);
+      if (!flac) {
+        emit_line("{\"event\":\"error\",\"code\":\"OPEN_FAILED\",\"message\":\"FLAC 流式打开失败\"}");
+        return 3;
+      }
+    } else {
+      flac = drflac_open_file(path, NULL);
+    }
     if (!flac) {
       emit_line("{\"event\":\"error\",\"code\":\"OPEN_FAILED\",\"message\":\"FLAC 打开失败\"}");
       return 3;
@@ -57,12 +124,12 @@ int naoe_play_file(const char *path, const char *backend_name, int start_ms) {
 
   NaoeConfig cfg;
   memset(&cfg, 0, sizeof(cfg));
-  snprintf(cfg.device, sizeof(cfg.device), "default");
+  snprintf(cfg.device, sizeof(cfg.device), "%s", device && *device ? device : "default");
   cfg.sample_rate = rate;
   cfg.channels = channels;
-  cfg.bits = 32;
-  snprintf(cfg.sample_format, sizeof(cfg.sample_format), "s32le");
-  cfg.exclusive = 1;
+  cfg.bits = bits == 16 ? 16 : 32;
+  snprintf(cfg.sample_format, sizeof(cfg.sample_format), "%s", cfg.bits == 16 ? "s16le" : "s32le");
+  cfg.exclusive = exclusive ? 1 : 0;
   cfg.buffer_ms = 100;
   cfg.volume = 1.0;
 
@@ -80,12 +147,6 @@ int naoe_play_file(const char *path, const char *backend_name, int start_ms) {
     emit_line(line);
     return 4;
   }
-  if (start_ms > 0) {
-    uint64_t frame = (uint64_t)((double)rate * start_ms / 1000.0);
-    if (is_mp3) drmp3_seek_to_pcm_frame(&mp3, frame);
-    else drflac_seek_to_pcm_frame(flac, frame);
-  }
-
   char line[512];
   snprintf(line, sizeof(line),
            "{\"event\":\"ready\",\"version\":\"" NAOE_VERSION "\",\"protocol\":\"" NAOE_PROTOCOL "\"}");
@@ -98,9 +159,15 @@ int naoe_play_file(const char *path, const char *backend_name, int start_ms) {
            backend->name, rate, channels, rate, channels, buffer_frames);
   emit_line(line);
   emit_line("{\"event\":\"started\"}");
+  if (start_ms > 0) {
+    uint64_t frame = (uint64_t)((double)rate * start_ms / 1000.0);
+    if (is_mp3) drmp3_seek_to_pcm_frame(&mp3, frame);
+    else drflac_seek_to_pcm_frame(flac, frame);
+  }
 
   const int chunk_frames = 4096;
   int32_t *pcm = (int32_t *)malloc((size_t)chunk_frames * (size_t)channels * sizeof(int32_t));
+  int16_t *pcm16 = cfg.bits == 16 ? (int16_t *)malloc((size_t)chunk_frames * (size_t)channels * sizeof(int16_t)) : NULL;
   float *tmp = is_mp3 ? (float *)malloc((size_t)chunk_frames * (size_t)channels * sizeof(float)) : NULL;
   if (!pcm || (is_mp3 && !tmp)) {
     emit_line("{\"event\":\"error\",\"code\":\"NOMEM\",\"message\":\"内存不足\"}");
@@ -123,7 +190,12 @@ int naoe_play_file(const char *path, const char *backend_name, int start_ms) {
       got = drflac_read_pcm_frames_s32(flac, chunk_frames, pcm);
     }
     if (got == 0) break;
-    if (!backend->write_int || backend->write_int(handle, pcm, (int)got, 32) < 0) {
+    void *payload = pcm;
+    if (cfg.bits == 16) {
+      for (uint64_t i = 0; i < got * (uint64_t)channels; i++) pcm16[i] = (int16_t)((uint32_t)pcm[i] >> 16);
+      payload = pcm16;
+    }
+    if (!backend->write_int || backend->write_int(handle, payload, (int)got, cfg.bits) < 0) {
       failed = 1;
       break;
     }
@@ -141,6 +213,7 @@ int naoe_play_file(const char *path, const char *backend_name, int start_ms) {
   if (!failed && backend->drain) backend->drain(handle);
   emit_line("{\"event\":\"drained\"}");
   free(pcm);
+  if (pcm16) free(pcm16);
   if (tmp) free(tmp);
   if (backend->close) backend->close(handle);
   if (is_mp3) drmp3_uninit(&mp3);

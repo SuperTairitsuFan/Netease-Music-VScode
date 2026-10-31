@@ -2947,10 +2947,9 @@ svg {
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.28);
 }
 
+.bp-range input[type="range"]:focus,
 .bp-range input[type="range"]:focus-visible {
-  outline: 1px solid var(--vscode-focusBorder, var(--red));
-  outline-offset: 2px;
-  border-radius: 999px;
+  outline: none;
 }
 /* independent scrollbars for cover/info, lyrics and comments */
 .song-left,
@@ -3290,10 +3289,43 @@ svg {
 .volume-pop input[type="range"] {
   writing-mode: vertical-lr;
   direction: rtl;
-  width: 22px;
+  width: 20px;
   height: 112px;
-  padding: 8px 0;
+  padding: 6px 0;
+  margin: 0;
+  appearance: none;
+  -webkit-appearance: none;
+  background: transparent;
   overflow: visible;
-  accent-color: var(--red);
+  cursor: pointer;
+}
+.volume-pop input[type="range"]::-webkit-slider-runnable-track {
+  width: 4px;
+  height: 100%;
+  border-radius: 999px;
+  background: rgba(128, 128, 128, 0.28);
+}
+.volume-pop input[type="range"]::-webkit-slider-thumb {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 12px;
+  height: 12px;
+  margin-left: -4px;
+  border: 0;
+  border-radius: 50%;
+  background: var(--red);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+}
+.volume-pop input[type="range"]::-moz-range-track {
+  width: 4px;
+  border-radius: 999px;
+  background: rgba(128, 128, 128, 0.28);
+}
+.volume-pop input[type="range"]::-moz-range-thumb {
+  width: 12px;
+  height: 12px;
+  border: 0;
+  border-radius: 50%;
+  background: var(--red);
 }
 .volume-pop span { font-size: 10px; color: var(--muted); }

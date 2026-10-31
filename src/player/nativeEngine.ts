@@ -114,12 +114,29 @@ export class NativeEngineSession extends EventEmitter {
     filePath: string,
     backend: "wasapi" | "asio",
     startMs: number,
+    growing = false,
+    donePath = "",
+    format: { exclusive: boolean; bits: number; device: string } = { exclusive: true, bits: 32, device: "default" },
   ): Promise<NativeEngineSession> {
     const stat = await fs.stat(binary).catch(() => null);
     if (!stat?.isFile()) throw new Error("原生引擎不存在：" + binary);
     const child = spawn(
       binary,
-      ["--play-file", filePath, "--start-ms", String(Math.max(0, Math.floor(startMs))), "--backend", backend],
+      [
+        "--play-file",
+        filePath,
+        "--start-ms",
+        String(Math.max(0, Math.floor(startMs))),
+        "--backend",
+        backend,
+        "--exclusive",
+        format.exclusive ? "1" : "0",
+        "--bits",
+        String(format.bits),
+        "--device",
+        format.device,
+        ...(growing ? ["--growing", "--done", donePath] : []),
+      ],
       { stdio: ["pipe", "pipe", "pipe"], windowsHide: true },
     ) as ChildProcessWithoutNullStreams;
     const session = new NativeEngineSession(child, binary);
@@ -336,7 +353,7 @@ export class NativeEngineSession extends EventEmitter {
     if (this.child.exitCode === null) {
       await Promise.race([
         new Promise<void>((resolve) => this.child.once("exit", () => resolve())),
-        new Promise<void>((resolve) => setTimeout(resolve, 3000)),
+        new Promise<void>((resolve) => setTimeout(resolve, 800)),
       ]);
     }
     this.removeAllListeners();

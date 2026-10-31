@@ -38,10 +38,10 @@ let captchaTimer: ReturnType<typeof setInterval> | undefined;
 
 const TABS: Array<{ key: string; label: string; icon: string }> = [
   { key: "account", label: "账号", icon: "account" },
-  { key: "general", label: "常规", icon: "settings" },
   { key: "system", label: "系统", icon: "device" },
-  { key: "playback", label: "播放", icon: "play" },
   { key: "quality", label: "音质与下载", icon: "verified" },
+  { key: "general", label: "常规", icon: "settings" },
+  { key: "playback", label: "播放", icon: "play" },
   { key: "components", label: "组件", icon: "puzzle" },
 ];
 
@@ -175,6 +175,9 @@ function onClick(event: Event): void {
     case "probeAudio":
       send("probeAudio");
       break;
+    case "restartApp":
+      send("restartApp");
+      break;
     case "selectDevice":
       send("selectDevice");
       break;
@@ -269,7 +272,7 @@ function accountBadge(): string {
 
 function renderAccount(): string {
   if (!account) {
-    return `<div class="set-card"><div class="set-card-head"><div class="t">账号</div><div class="d">登录后可同步歌单、收藏与会员音质</div></div>
+    return `<div class="set-card"><div class="set-card-head"><div class="t">账号</div><div class="d">当前插件版本 v${esc(settings?.version ?? "")}</div><div class="d">登录后可同步歌单、收藏与会员音质</div></div>
       <div class="account-card">
         <div style="width:72px;height:72px;border-radius:50%;background:var(--hover);display:flex;align-items:center;justify-content:center;color:var(--muted)">${icon("login", 28)}</div>
         <div><div class="name">未登录</div><div class="id">使用网易云音乐 App 扫码，或手机验证码 / 密码登录</div></div>
@@ -291,7 +294,7 @@ function renderAccount(): string {
         <button class="btn small" data-act="logout">${icon("logout", 11)} 退出登录</button>
       </div>
     </div>
-    <div class="set-row"><div><div class="label">会员音质</div><div class="hint">SVIP 可使用高清臻音 / 沉浸环绕声 / 超清母带；实际可用档位以服务端权益为准。</div></div><div class="control">${accountBadge()}</div></div>
+    <div class="set-row"><div><div class="label">会员音质</div><div class="hint">SVIP 可使用高清臻音 / 超清母带；当前版本不支持沉浸环绕声、EQ 与音效调整。</div></div><div class="control">${accountBadge()}</div></div>
   </div>`;
 }
 
@@ -337,15 +340,17 @@ function renderSystem(): string {
   const sampleFormats = ["auto", "s16le", "s24le", "s32le", "f32le"];
   return `<div class="set-card"><div class="set-card-head"><div class="t">音频输出</div><div class="d">原生引擎由独立组件提供，可启用 / 禁用 / 卸载</div></div>
     ${selectRow("输出模式", "auto 优先 WebAudio；native 强制原生，失败不回退", "output.mode", cfg.outputMode, [
-      { value: "auto", label: "自动（优先 WebAudio）" },
-      { value: "webaudio", label: "仅 WebAudio" },
-      { value: "native", label: "仅原生引擎" },
+      { value: "auto", label: "自动（优先 WebAudio，开箱即用）" },
+      { value: "webaudio", label: "仅 WebAudio（免驱动，可能被浏览器拦截）" },
+      { value: "native", label: "仅原生引擎（独占，需组件）" },
     ])}
     <div class="set-row"><div><div class="label">输出设备</div><div class="hint">${esc(native.devices?.find((device) => device.id === cfg.device)?.name ?? (cfg.device || "系统默认设备"))}</div></div><div class="control"><button class="btn small" data-act="probeAudio">${icon("pulse", 11)} 探测</button><button class="btn small" data-act="selectDevice">${icon("device", 11)} 选择设备</button></div></div>
     ${selectRow("原生后端", "WASAPI 系统音频；ASIO 需 DAC 厂商驱动（bit-perfect 推荐）", "output.backend", cfg.nativeBackend, [
-      { value: "wasapi", label: "WASAPI" },
-      { value: "asio", label: "ASIO" },
+      { value: "wasapi", label: "WASAPI（兼容好，部分 DAC 会断续）" },
+      { value: "asio", label: "ASIO（最干净，需厂商驱动）" },
     ])}
+    <div class="set-row"><div><div class="label">怎么选</div><div class="hint">想开箱即用选 WebAudio：不需要驱动、不占用声卡，但受浏览器自动播放和系统混音影响。需要独占音质选原生：WASAPI 兼容性较好但部分 USB DAC 会断续；ASIO 绕过 Windows 混音器、最干净，但必须安装 DAC 厂商 ASIO 驱动，且同一时间只能被一个程序占用。</div></div></div>
+    <div class="set-row"><div><div class="label">重启 VS Code</div><div class="hint">关闭所有 VS Code 窗口后自动重新启动，组件/设置改动会生效</div></div><div class="control"><button class="btn small" data-act="restartApp">重启生效</button></div></div>
     ${switchRow("独占模式", "Windows WASAPI Exclusive / Linux ALSA hw: 直连，绕过系统混音器", "output.exclusive", cfg.exclusive)}
     ${switchRow("Bit-perfect（严格）", "强制原生 Exclusive + 源采样率/位深；音量固定 100%，不做增益", "output.bitPerfect", cfg.bitPerfect)}
     ${selectRow("采样率", "auto 跟随音源；手动值必须与音源一致（引擎不做重采样）", "output.sampleRate", cfg.sampleRate, formatOptions.map((value) => ({ value, label: value === "auto" ? "auto（跟随音源）" : `${Number(value) / 1000} kHz` })))}
@@ -426,7 +431,8 @@ function renderQuality(): string {
     .join("")}`;
   return `<div class="set-card"><div class="set-card-head"><div class="t">音质播放设置</div><div class="d">当前账号：${account ? esc(account.nickname) : "未登录"} ${accountBadge()}</div></div>
     <div class="quality-list">${playbackRows}</div>
-    <div class="set-row"><div><div class="label">实际音质</div><div class="hint">服务端可能按版权与会员权益降级；状态栏显示实际返回的档位。</div></div></div>
+    <div class="set-row"><div><div class="label">实际音质</div><div class="hint">服务端可能按版权与会员权益降级；状态栏显示实际返回的档位。参数为常见上限，实际以服务端返回为准。</div></div></div>
+    <div class="set-row"><div><div class="label">当前版本限制</div><div class="hint">当前版本不支持沉浸环绕声、EQ 与音效调整；只提供 WebAudio / WASAPI / ASIO 的原始音频输出，不做音效处理。</div></div></div>
   </div>
   <div class="set-card"><div class="set-card-head"><div class="t">音质下载设置</div><div class="d">下载任务使用的音质档位</div></div>
     <div class="quality-list">${downloadRows}</div>

@@ -69,3 +69,34 @@ export async function fetchJson<T>(url: string, timeoutMs = 15000): Promise<T> {
     clearTimeout(timer);
   }
 }
+
+export async function downloadToGrowingFile(
+  url: string,
+  dest: string,
+  donePath: string,
+  options: DownloadOptions = {},
+): Promise<DownloadResult> {
+  const res = await fetch(url, {
+    redirect: "follow",
+    signal: options.signal,
+    headers: { "User-Agent": UA, Referer: "https://music.163.com/", ...(options.headers ?? {}) },
+  });
+  if (!res.ok) throw new Error(`下载失败：HTTP ${res.status}`);
+  if (!res.body) throw new Error("下载失败：响应没有内容");
+  const total = Number(res.headers.get("content-length") ?? 0);
+  await fs.mkdir(path.dirname(dest), { recursive: true });
+  const stream = Readable.fromWeb(res.body as Parameters<typeof Readable.fromWeb>[0]);
+  let received = 0;
+  stream.on("data", (chunk: Buffer) => {
+    received += chunk.length;
+    options.onProgress?.({ received, total });
+  });
+  try {
+    await pipeline(stream, createWriteStream(dest));
+    await fs.writeFile(donePath, "done");
+  } catch (err) {
+    await fs.writeFile(donePath, "error").catch(() => undefined);
+    throw err;
+  }
+  return { bytes: received, total };
+}
