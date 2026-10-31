@@ -2,6 +2,17 @@
 
 - [音频引擎架构、WASAPI 独占、ASIO、Bit-perfect、流式解码与故障排查](AUDIO_ENGINE.md)
 
+## 小巧轻量
+
+- VSIX 安装包约 **1.75 MB**
+- 安装后磁盘占用约 **2.36 MB**（21 个文件）
+- Windows 原生音频引擎仅 **198 KB**
+- 原生播放时内存约 **12 MB**，CPU 接近 0%
+- 默认 WebAudio 路径不启动原生进程，不额外常驻后台
+
+没有 Electron 外壳、没有内置浏览器、没有独立播放器进程；插件复用 VS Code 自身的 Webview 与扩展宿主。
+
+
 # 网易云音乐 for VS Code
 
 在 VS Code 里运行一个**桌面客户端形态**的网易云音乐：侧边栏管理歌单，编辑器区浏览歌曲、歌手、专辑、评论，底部状态栏控制播放。数据通过 EAPI（桌面客户端协议）获取，可选 Windows WASAPI / Linux ALSA 原生音频输出。

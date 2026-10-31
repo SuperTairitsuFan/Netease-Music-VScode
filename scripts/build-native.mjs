@@ -27,7 +27,7 @@ const TARGETS = {
     backend: "alsa",
     entry: "native-audio-output",
     libs: ["-ldl", "-lpthread", "-lm"],
-    cflags: ["-D_POSIX_C_SOURCE=200809L", "-I", path.join(root, "native/third_party")],
+    cflags: ["-D_POSIX_C_SOURCE=200809L", "-I", path.join(root, "native/third_party"), "-I", path.join(root, "native/third_party/dr_libs")],
   },
   "linux-arm64": {
     triple: "aarch64-linux-gnu",
@@ -36,7 +36,16 @@ const TARGETS = {
     backend: "alsa",
     entry: "native-audio-output",
     libs: ["-ldl", "-lpthread", "-lm"],
-    cflags: ["-D_POSIX_C_SOURCE=200809L", "-I", path.join(root, "native/third_party")],
+    cflags: ["-D_POSIX_C_SOURCE=200809L", "-I", path.join(root, "native/third_party"), "-I", path.join(root, "native/third_party/dr_libs")],
+  },
+  "win32-arm64": {
+    triple: "aarch64-windows-gnu",
+    platform: "win32",
+    arch: "arm64",
+    backend: "wasapi",
+    entry: "native-audio-output.exe",
+    libs: ["-lole32", "-luuid", "-loleaut32", "-lavrt", "-ladvapi32"],
+    cflags: ["-I", path.join(root, "native/src"), "-I", path.join(root, "native/third_party/asio"), "-I", path.join(root, "native/third_party/dr_libs")],
   },
   "win32-x64": {
     triple: "x86_64-windows-gnu",

@@ -722,7 +722,7 @@ export class PlayerService implements vscode.Disposable {
       if (cachedAudio) {
         const useNativeCached = await this.shouldUseNative();
         this.currentResolved = null;
-        this.actualQuality = "cache";
+        this.actualQuality = `${QUALITY_LABELS[this.getConfig().quality] ?? this.getConfig().quality}（缓存）`;
         if (useNativeCached) {
           const record = await this.components.nativeRecord();
           if (!record?.entryPath) throw new Error("原生引擎组件不存在");

@@ -242,11 +242,18 @@ async function main() {
         }),
       });
     }
-    const assetName = path.basename(vsix);
-    const existing = (release.assets ?? []).find((asset) => asset.name === assetName);
-    if (existing) console.log(`[github] release asset already exists: ${existing.browser_download_url}`);
-    else {
-      const uploaded = await uploadAsset(release.upload_url.replace(/\{.*$/, ""), vsix, assetName);
+    const assetNames = fs
+      .readdirSync(path.join(root, "dist-vsix"))
+      .filter((name) => name.startsWith(`netease-music-${pkg.version}-`) && name.endsWith(".vsix"))
+      .sort();
+    for (const assetName of assetNames) {
+      const assetPath = path.join(root, "dist-vsix", assetName);
+      const existing = (release.assets ?? []).find((asset) => asset.name === assetName);
+      if (existing) {
+        console.log(`[github] release asset already exists: ${existing.browser_download_url}`);
+        continue;
+      }
+      const uploaded = await uploadAsset(release.upload_url.replace(/\{.*$/, ""), assetPath, assetName);
       console.log(`[github] release asset: ${uploaded.browser_download_url}`);
     }
   } else {

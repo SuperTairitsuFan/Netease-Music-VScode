@@ -1860,13 +1860,24 @@ export class App implements vscode.Disposable {
 
   private restartApp(): void {
     const exe = process.execPath;
+    log.info("restart app", { exe });
     try {
-      const child = spawn(exe, ["--reuse-window"], { detached: true, stdio: "ignore" });
+      // The old instance is still running when this is spawned. Wait a few
+      // seconds after quitting, then launch a fresh Code process. Using cmd
+      // start detaches the new process from the extension-host job object.
+      const command = `ping -n 4 127.0.0.1 >nul & start "" "${exe}"`;
+      const child = spawn(process.env.ComSpec ?? "cmd.exe", ["/d", "/s", "/c", command], {
+        detached: true,
+        windowsHide: true,
+        stdio: "ignore",
+      });
       child.unref();
-    } catch {
-      /* fall through to quit */
+    } catch (err) {
+      log.warn("restart spawn failed", (err as Error).message);
     }
-    void vscode.commands.executeCommand("workbench.action.quit");
+    setTimeout(() => {
+      void vscode.commands.executeCommand("workbench.action.quit");
+    }, 300);
   }
 
   private async probeAudio(announce: boolean): Promise<EngineProbe> {

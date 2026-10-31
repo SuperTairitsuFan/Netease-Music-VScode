@@ -17,7 +17,7 @@ import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const pkg = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8"));
-const TARGETS = ["linux-x64", "linux-arm64", "win32-x64"];
+const TARGETS = ["linux-x64", "linux-arm64", "win32-x64", "win32-arm64"];
 
 function run(command, args, cwd = root) {
   console.log(`[package] ${command} ${args.join(" ")}`);

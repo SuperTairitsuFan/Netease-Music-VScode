@@ -4,6 +4,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if !defined(_WIN32)
+#include <strings.h>
+#endif
 
 #if defined(_WIN32)
 #include <windows.h>
@@ -23,7 +26,11 @@ static void emit_line(const char *line) {
 
 static int ends_with(const char *s, const char *suffix) {
   size_t n = strlen(s), m = strlen(suffix);
+  #if defined(_WIN32)
   return n >= m && _stricmp(s + n - m, suffix) == 0;
+#else
+  return n >= m && strcasecmp(s + n - m, suffix) == 0;
+#endif
 }
 
 typedef struct {
