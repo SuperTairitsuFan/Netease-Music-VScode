@@ -178,6 +178,9 @@ function onClick(event: Event): void {
     case "restartApp":
       send("restartApp");
       break;
+    case "openDir":
+      send("openDir", { dir: el.dataset.dir });
+      break;
     case "selectDevice":
       send("selectDevice");
       break;
@@ -271,14 +274,27 @@ function accountBadge(): string {
 }
 
 function renderAccount(): string {
+    const st = settings?.stats;
+  const mb = (n: number) => (n >= 1024 * 1024 * 1024 ? (n / 1024 / 1024 / 1024).toFixed(2) + " GB" : (n / 1024 / 1024).toFixed(1) + " MB");
+  const statsCard = st
+    ? `<div class="set-card"><div class="set-card-head"><div class="t">本机资源占用</div><div class="d">实时读取当前配置目录</div></div>
+      <div class="set-row"><div><div class="label">插件安装位置</div><div class="hint">${esc(st.extensionPath)}</div></div><div class="control"><button class="btn small" data-act="openDir" data-dir="extension">打开目录</button></div></div>
+      <div class="set-row"><div><div class="label">插件本体</div><div class="hint">${mb(st.extensionBytes)}</div></div></div>
+      <div class="set-row"><div><div class="label">扩展宿主</div><div class="hint">CPU ${st.hostCpu}% · 内存 ${mb(st.hostRss)}</div></div></div>
+      <div class="set-row"><div><div class="label">音频缓存</div><div class="hint">${st.cacheFiles} 首 · ${mb(st.cacheBytes)}</div></div><div class="control"><button class="btn small" data-act="openDir" data-dir="cache">打开目录</button></div></div>
+      <div class="set-row"><div><div class="label">下载歌曲</div><div class="hint">${st.downloadFiles} 首 · ${mb(st.downloadBytes)}</div></div><div class="control"><button class="btn small" data-act="openDir" data-dir="download">打开目录</button></div></div>
+      <div class="set-row"><div><div class="label">下载封面</div><div class="hint">${st.coverFiles} 张 · ${mb(st.coverBytes)}</div></div><div class="control"><button class="btn small" data-act="openDir" data-dir="cover">打开目录</button></div></div>
+      <div class="set-row"><div><div class="label">本地音乐</div><div class="hint">${st.localFiles} 首 · ${mb(st.localBytes)}</div></div><div class="control"><button class="btn small" data-act="openDir" data-dir="local">打开目录</button></div></div>
+    </div>`
+    : "";
   if (!account) {
-    return `<div class="set-card"><div class="set-card-head"><div class="t">账号</div><div class="d">当前插件版本 v${esc(settings?.version ?? "")}</div><div class="d">登录后可同步歌单、收藏与会员音质</div></div>
+  return `<div class="set-card"><div class="set-card-head"><div class="t">账号</div><div class="d">当前插件版本 v${esc(settings?.version ?? "")}</div><div class="d">登录后可同步歌单、收藏与会员音质</div></div>
       <div class="account-card">
         <div style="width:72px;height:72px;border-radius:50%;background:var(--hover);display:flex;align-items:center;justify-content:center;color:var(--muted)">${icon("login", 28)}</div>
         <div><div class="name">未登录</div><div class="id">使用网易云音乐 App 扫码，或手机验证码 / 密码登录</div></div>
         <div class="actions"><button class="btn primary" data-act="login">${icon("login", 12)} 登录</button></div>
       </div>
-    </div>`;
+    </div>` + statsCard;
   }
   return `<div class="set-card"><div class="set-card-head"><div class="t">账号</div><div class="d">登录状态、会员标识与退出登录</div></div>
     <div class="account-card">
@@ -295,7 +311,7 @@ function renderAccount(): string {
       </div>
     </div>
     <div class="set-row"><div><div class="label">会员音质</div><div class="hint">SVIP 可使用高清臻音 / 超清母带；当前版本不支持沉浸环绕声、EQ 与音效调整。</div></div><div class="control">${accountBadge()}</div></div>
-  </div>`;
+  </div>` + statsCard;
 }
 
 function switchRow(label: string, hint: string, key: string, value: boolean): string {
@@ -491,7 +507,14 @@ function renderComponents(): string {
     ${native.ready ? `<div class="set-row"><div><div class="label">原生音频输出</div><div class="hint">${esc(native.backend ?? "")} · ${native.devices?.length ?? 0} 个设备</div></div><div class="control"><span class="pill accent">就绪</span></div></div>` : `<div class="set-row"><div><div class="label">原生音频输出</div><div class="hint">${esc(native.reason ?? "未安装或未启用")}</div></div><div class="control"><span class="pill">未就绪</span></div></div>`}
     <div class="set-card headless" style="margin:0;border:0;border-bottom:1px solid var(--border);border-radius:0"><div class="set-card-head"><div class="t">原生组件</div></div>${natives.length ? natives.map(componentCard).join("") : `<div class="empty">未安装 Native Audio Output Engine<br><button class="btn small" data-act="restoreBundled" style="margin-top:8px">${icon("refresh", 11)} 恢复随包原生引擎</button></div>`}</div>
     <div class="set-card headless" style="margin:0;border:0;border-bottom:1px solid var(--border);border-radius:0"><div class="set-card-head"><div class="t">内置模块</div></div>${builtins.map(componentCard).join("")}</div>
-    <div class="set-card headless" style="margin:0;border:0;border-radius:0"><div class="set-card-head"><div class="t">第三方 UI 组件</div></div>${uis.length ? uis.map(componentCard).join("") : `<div class="empty">安装包含 component.json 的组件目录后显示在这里</div>`}</div>
+    <div class="set-card headless" style="margin:0;border:0;border-radius:0"><div class="set-card-head"><div class="t">组件 UI</div></div>
+    ${switchRow("状态栏：歌名跑马灯","显示/隐藏状态栏歌名","status.showTitle",settings!.showTitle)}
+    ${switchRow("状态栏：缓冲","显示/隐藏状态栏缓冲框","status.showBuffer",settings!.showBuffer)}
+    ${switchRow("状态栏：喜欢","显示/隐藏状态栏喜欢按钮","status.showLike",settings!.showLike)}
+    ${switchRow("状态栏：收藏","显示/隐藏状态栏收藏到歌单按钮","status.showFavorite",settings!.showFavorite)}
+    ${switchRow("状态栏：播放模式","显示/隐藏状态栏循环模式按钮","status.showMode",settings!.showMode)}
+    ${switchRow("状态栏：上一首/播放/下一首","显示/隐藏状态栏导航按钮","status.showNavigation",settings!.showNavigation)}
+    ${switchRow("状态栏：播放队列","显示/隐藏状态栏队列按钮","status.showQueue",settings!.showQueue)}${uis.length ? uis.map(componentCard).join("") : `<div class="empty">安装包含 component.json 的组件目录后显示在这里</div>`}</div>
   </div>`;
 }
 
@@ -576,7 +599,7 @@ window.addEventListener("message", (event: MessageEvent<HostMessage>) => {
     case "settings":
       settings = msg.settings;
       if (state) state.settings = msg.settings;
-      if (tab === "general" || tab === "system" || tab === "playback" || tab === "quality") render();
+      if (tab === "general" || tab === "system" || tab === "playback" || tab === "quality" || tab === "components") render();
       break;
     case "account":
       account = msg.account;

@@ -266,7 +266,8 @@ a {
 .toasts {
   position: fixed;
   right: 14px;
-  bottom: 14px;
+  bottom: 58px;
+  pointer-events: none;
   z-index: 90;
   display: flex;
   flex-direction: column;
@@ -275,6 +276,8 @@ a {
 }
 
 .toast {
+  pointer-events: auto;
+  cursor: pointer;
   padding: 8px 12px;
   border-radius: 6px;
   border: 1px solid var(--border);
@@ -3329,3 +3332,52 @@ svg {
   background: var(--red);
 }
 .volume-pop span { font-size: 10px; color: var(--muted); }
+
+/* sleep timer popover */
+.sleep-pop {
+  position: fixed;
+  right: 12px;
+  bottom: 52px;
+  z-index: 80;
+  width: 176px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-soft);
+  box-shadow: var(--shadow);
+}
+.sleep-pop[hidden] { display: none; }
+.sleep-title { font-size: 12px; font-weight: 600; margin-bottom: 8px; }
+.sleep-inputs { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+.sleep-inputs label { display: flex; align-items: center; gap: 4px; font-size: 12px; color: var(--muted); }
+.sleep-pop input { flex: 1; min-width: 0;
+  width: auto;
+  box-sizing: border-box;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--fg);
+  font-size: 13px;
+}
+.sleep-error { display: none; color: var(--red); font-size: 11px; margin-top: 5px; }
+.sleep-actions { display: flex; gap: 6px; margin-top: 8px; }
+.sleep-actions .btn { flex: 1; }
+
+/* keep the sleep timer popover inside the narrow sidebar */
+.sleep-pop { left: 10px; right: 10px; width: auto; bottom: 56px; }
+.sleep-inputs { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+.sleep-inputs label { min-width: 0; flex-direction: column; align-items: flex-start; }
+.sleep-pop input { flex: none; width: 100%; min-width: 0; }
+
+.rate-btn.disabled { opacity: 0.45; cursor: not-allowed; }
+
+.queue-source { margin-left: auto; padding: 2px 6px; border: 1px solid var(--border); border-radius: 5px; background: transparent; color: var(--muted); font-size: 11px; cursor: pointer; }
+.queue-source:hover { background: var(--hover); color: var(--fg); }
+
+.quality-pop .sleep-title { display: flex; align-items: center; justify-content: space-between; }
+.quality-close { font-size: 16px; line-height: 1; padding: 0 2px; }
+.quality-option { display: flex; align-items: center; justify-content: space-between; width: 100%; padding: 6px 4px; border: 0; border-radius: 5px; background: transparent; color: var(--fg); font-size: 12px; cursor: pointer; text-align: left; }
+.quality-option:hover, .quality-option.current { background: var(--hover); }
+.quality-option.current span:first-child::before { content: "✓ "; color: var(--red); }
+.quality-desc { color: var(--muted); font-size: 10px; margin-left: 8px; }

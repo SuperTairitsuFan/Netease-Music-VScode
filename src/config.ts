@@ -33,6 +33,7 @@ export interface MusicConfig {
   localMusic: { dir: string };
   api: { baseUrl: string; timeout: number; userAgent: string; realIP: string; cookie: string };
   playback: { volume: number; mode: PlayMode; rememberQueue: boolean; autoPlay: boolean; backgroundPlay: boolean };
+  status: { showTitle: boolean; showLike: boolean; showFavorite: boolean; showMode: boolean; showNavigation: boolean; showBuffer: boolean; showQueue: boolean };
   ui: { theme: string; showLyrics: boolean; panels: Record<string, boolean>; compact: boolean; autoOpen: boolean };
   components: { dir: string; nativeEnginePath: string; verifyHash: boolean; downloadUrl: string; autoDownload: boolean };
 }
@@ -181,6 +182,15 @@ export function getConfig(): MusicConfig {
       userAgent: c.get<string>("api.userAgent") ?? "",
       realIP: c.get<string>("api.realIP") ?? "",
       cookie: c.get<string>("api.cookie") ?? "",
+    },
+    status: {
+      showTitle: c.get<boolean>("status.showTitle") ?? true,
+      showLike: c.get<boolean>("status.showLike") ?? true,
+      showFavorite: c.get<boolean>("status.showFavorite") ?? true,
+      showMode: c.get<boolean>("status.showMode") ?? true,
+      showNavigation: c.get<boolean>("status.showNavigation") ?? true,
+      showBuffer: c.get<boolean>("status.showBuffer") ?? true,
+      showQueue: c.get<boolean>("status.showQueue") ?? true,
     },
     playback: {
       volume: Math.max(0, Math.min(100, c.get<number>("playback.volume") ?? 80)),

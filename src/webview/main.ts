@@ -1,5 +1,6 @@
 import "./webview.css";
 import type { Account, AlbumDetail, ArtistDetail, Comment, PlaylistRef, SongPage, Track, UserPage } from "../api/types";
+import type { PlaybackSource } from "../protocol";
 import { parseLrc } from "../api/normalize";
 import type {
   CommentsView,
@@ -33,6 +34,7 @@ const logo = app.dataset.logo ?? "";
 let player: PlayerState | null = null;
 let account: Account | null = null;
 let queue: Track[] = [];
+let queueSources: Array<PlaybackSource | null> = [];
 let page: PageView = { kind: "recommend", title: "推荐", loading: true };
 let comments: CommentsView | null = null;
 let subscribers: SubscribersView | null = null;
@@ -718,7 +720,6 @@ function renderBottomPlayer(): void {
       .filter((name) => name && !/\{(?:artist|name|album)\}/i.test(name))
       .join(" / ") || "本地音乐";
   box.innerHTML = `<div class="bp-left" data-act="openSongDetail" data-id="${track.id}" title="打开歌曲详情"><img src="${esc(cover(track.album?.picUrl, 60))}" alt=""><div class="bp-meta"><div class="bp-title">${esc(track.name)}</div><div class="bp-sub">${esc(artistText)}</div></div></div>
-    <div class="bp-controls"><button class="icon-btn bp-like" data-act="likeTrack" data-id="${track.id}" title="喜欢"></button><button class="icon-btn bp-favorite" data-act="openFavorite" data-id="${track.id}" title="收藏到歌单">${icon("star", 14)}</button><button class="icon-btn bp-mode" data-act="cycleMode"></button><button class="icon-btn" data-act="previous" title="上一首">${icon("prev", 14)}</button><button class="icon-btn" data-act="playPause" title="播放/暂停">${icon(player.playing ? "pause" : "play", 14)}</button><button class="icon-btn" data-act="next" title="下一首">${icon("next", 14)}</button></div>
     <div class="bp-seek-wrap"><span class="bp-time" id="bp-cur">${fmtTime(player.position)}</span><div class="bp-range" id="bp-range"><div class="bp-buffered" id="bp-buffered"></div><div class="bp-played" id="bp-played"></div><input id="bp-seek" type="range" min="0" max="${Math.max(1, player.duration)}" value="${Math.min(player.position, player.duration || player.position)}" step="0.5" aria-label="播放进度" /></div><span class="bp-time" id="bp-dur">${fmtTime(player.duration)}</span></div>`;
   updateModeButton(box);
   updateLikeButton(box);
@@ -763,6 +764,19 @@ function updateModeButton(box: HTMLElement): void {
   button.dataset.mode = mode;
 }
 
+function currentPlaybackSource(): PlaybackSource | null {
+  if (page.kind === "playlist" && page.playlist) {
+    return { kind: "playlist", id: page.playlist.playlist.id, name: page.playlist.playlist.name };
+  }
+  if (page.kind === "album" && page.album) {
+    return { kind: "album", id: page.album.id, name: page.album.name };
+  }
+  if ((page.kind === "artist" || page.kind === "artistSongs") && page.artist) {
+    return { kind: "artist", id: page.artist.id, name: page.artist.name };
+  }
+  return null;
+}
+
 function renderQueuePopup(): void {
   const root = qs("#queue-popup-root");
   if (!root) return;
@@ -772,7 +786,7 @@ function renderQueuePopup(): void {
   }
   const current = player?.track?.id;
   root.innerHTML = `<div class="queue-popup">
-    <div class="queue-popup-head"><span>播放列表</span><span class="queue-count">${queue.length}</span><span class="spacer"></span><button class="icon-btn" data-act="closeQueuePopup" title="关闭">${icon("close", 14)}</button></div>
+    <div class="queue-popup-head"><span>播放列表</span><span class="queue-count">${queue.length}</span><span class="spacer"></span><button class="btn small" data-act="locateQueueCurrent">定位当前</button><button class="btn small" data-act="locateQueuePlaylist">定位歌单</button><button class="icon-btn" data-act="closeQueuePopup" title="关闭">${icon("close", 14)}</button></div>
     <div class="queue-popup-list">
       ${
         queue.length
@@ -910,7 +924,7 @@ function playlistDisplayTracks(): Track[] {
   if (playlistLikeOrder !== "none") {
     tracks.sort((a, b) => (playlistLikeOrder === "first" ? 1 : -1) * (Number(isLiked(b)) - Number(isLiked(a))));
   }
-  const priorities: Array<"artist" | "album" | "title" | "duration"> = ["album", "title", "duration"];
+  const priorities: Array<"artist" | "album" | "title" | "duration"> = ["artist", "album", "title", "duration"];
   const activeSorts = priorities
     .map((key) => playlistSort.find((entry) => entry.key === key))
     .filter((entry): entry is { key: "title" | "artist" | "album" | "duration"; dir: 1 | -1 } => Boolean(entry));
@@ -1424,6 +1438,33 @@ function onClick(event: Event): void {
     case "openQueue":
       send("openQueue");
       break;
+    case "locateQueuePlaylist": {
+      const source = player?.index != null ? queueSources[player.index] : undefined;
+      if (!source) {
+        toast("当前歌曲没有可定位的来源", "info");
+        break;
+      }
+      pendingLocate = true;
+      if (source.kind === "album") send("openAlbum", { id: source.id });
+      else if (source.kind === "artist") send("openArtistSongs", { id: source.id, name: source.name });
+      else if (source.kind === "playlist" || !source.kind) send("openPlaylist", { id: source.id });
+      else {
+        pendingLocate = false;
+        toast("当前来源不支持定位", "info");
+      }
+      break;
+    }
+    case "locateQueueCurrent": {
+      const row = qs<HTMLElement>(".queue-row.current");
+      if (!row) {
+        toast("播放列表里没有当前歌曲", "info");
+        break;
+      }
+      row.scrollIntoView({ block: "center", behavior: "smooth" });
+      row.classList.add("flash");
+      window.setTimeout(() => row.classList.remove("flash"), 900);
+      break;
+    }
     case "closeQueuePopup":
       queuePopupOpen = false;
       renderQueuePopup();
@@ -1436,7 +1477,7 @@ function onClick(event: Event): void {
       break;
     case "playNext": {
       const track = findTrack(Number(el.dataset.id));
-      if (track) send("playNext", { track });
+      if (track) send("playNext", { track, source: currentPlaybackSource() });
       break;
     }
     case "openFavorite":
@@ -1575,7 +1616,7 @@ function onClick(event: Event): void {
       const fallback = listForTrack(track);
       const list = kind ? currentList(kind) : fallback.list;
       const index = kind ? Number(el.dataset.index ?? 0) : fallback.index;
-      send("playTrack", { track, list, index });
+      send("playTrack", { track, list, index, source: currentPlaybackSource() });
       break;
     }
     case "trackMenu": {
@@ -1587,7 +1628,7 @@ function onClick(event: Event): void {
     }
     case "playAll": {
       const tracks = currentList(el.dataset.list ?? "");
-      if (tracks.length) send("playAll", { tracks, index: 0 });
+      if (tracks.length) send("playAll", { tracks, index: 0, source: currentPlaybackSource() });
       break;
     }
     case "enqueuePlaylist":
@@ -1671,7 +1712,7 @@ function onClick(event: Event): void {
       send("previous");
       break;
     case "ctx-play":
-      if (contextTrack) send("playTrack", { track: contextTrack, list: contextList, index: contextIndex });
+      if (contextTrack) send("playTrack", { track: contextTrack, list: contextList, index: contextIndex, source: currentPlaybackSource() });
       closeContextMenu();
       break;
     case "ctx-like":
@@ -1689,7 +1730,7 @@ function onClick(event: Event): void {
       closeContextMenu();
       break;
     case "ctx-next":
-      if (contextTrack) send("playNext", { track: contextTrack });
+      if (contextTrack) send("playNext", { track: contextTrack, source: currentPlaybackSource() });
       closeContextMenu();
       break;
     case "ctx-detail":
@@ -1847,6 +1888,7 @@ function applyInit(state: InitState): void {
   player = state.player;
   account = state.account;
   queue = state.queue ?? [];
+  queueSources = state.queueSources ?? [];
   page = state.page;
   if (page.kind === "song") songPageId = page.song?.track.id ?? 0;
   downloads = state.downloads ?? [];
@@ -2022,7 +2064,12 @@ window.addEventListener("message", (event: MessageEvent<HostMessage>) => {
       break;
     case "queue":
       queue = msg.tracks;
+      queueSources = msg.sources ?? [];
       if (page.kind === "queue" || page.kind === "now") render();
+      renderQueuePopup();
+      break;
+    case "toggleQueue":
+      queuePopupOpen = !queuePopupOpen;
       renderQueuePopup();
       break;
     case "queuePopup":
@@ -2116,10 +2163,10 @@ function toast(message: string, kind: "info" | "error" | "success" = "info"): vo
   const item = document.createElement("div");
   item.className = `toast ${kind}`;
   item.textContent = message;
+  item.addEventListener("click", () => item.remove());
   box.appendChild(item);
-  while (box.children.length > 4) box.firstElementChild?.remove();
-  if (toastTimer) clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => item.remove(), 4200);
+  while (box.children.length > 3) box.firstElementChild?.remove();
+  window.setTimeout(() => item.remove(), 2600);
 }
 
 boot();

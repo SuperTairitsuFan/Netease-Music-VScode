@@ -1,7 +1,30 @@
 import * as fs from "node:fs/promises";
+import * as fsSync from "node:fs";
 import * as path from "node:path";
 import { spawn } from "node:child_process";
 import * as vscode from "vscode";
+function safeDirStats(dir: string, exts?: RegExp): { bytes: number; files: number } {
+  let bytes = 0;
+  let files = 0;
+  try {
+    for (const entry of fsSync.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        const nested = safeDirStats(full, exts);
+        bytes += nested.bytes;
+        files += nested.files;
+      } else if (entry.isFile()) {
+        if (exts && !exts.test(entry.name)) continue;
+        bytes += fsSync.statSync(full).size;
+        files += 1;
+      }
+    }
+  } catch {
+    /* missing directory */
+  }
+  return { bytes, files };
+}
+
 import * as QRCode from "qrcode";
 import { SessionManager } from "./auth/session";
 import { commentResource } from "./api/client";
@@ -78,15 +101,20 @@ export class App implements vscode.Disposable {
   readonly settingsPanel: SettingsPanelProvider;
 
   private readonly status = {
-    previous: vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 109),
-    play: vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 108),
-    next: vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 107),
-    title: vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 106),
+    buffer: vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 119),
+    like: vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 118),
+    favorite: vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 117),
+    mode: vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 116),
+    previous: vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 115),
+    play: vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 114),
+    next: vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 113),
+    title: vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 120),
     quality: vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 105),
+    sleep: vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 104.5),
     volume: vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 104),
     now: vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 103),
-    queue: vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 102),
-    settings: vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 101),
+    queue: vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 112),
+    settings: vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 111),
     idle: vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100),
   };
   private readonly disposables: vscode.Disposable[] = [];
@@ -120,6 +148,8 @@ export class App implements vscode.Disposable {
   private marqueeTimer?: NodeJS.Timeout;
   private lastTitle = "";
   private sleepTimer?: NodeJS.Timeout;
+  private sleepTicker?: NodeJS.Timeout;
+  private sleepUntil?: number;
 
   constructor(private readonly ctx: vscode.ExtensionContext) {
     this.session = new SessionManager(ctx, getConfig);
@@ -331,6 +361,7 @@ export class App implements vscode.Disposable {
       player: this.player.state(),
       account: this.session.accountInfo,
       queue: this.player.getQueue(),
+      queueSources: this.player.getQueueSources(),
       settings: this.settingsView(),
       page: this.currentPage,
       panels: {
@@ -365,10 +396,44 @@ export class App implements vscode.Disposable {
     };
   }
 
+  private resourceStats() {
+    const cfg = getConfig();
+    const extension = safeDirStats(this.ctx.extensionPath);
+    const cache = safeDirStats(cfg.cache.dir || defaultCacheDir(this.ctx), /\.(flac|mp3|m4a|wav|ogg)$/i);
+    const download = safeDirStats(this.downloads.dir, /\.(flac|mp3|m4a|wav|ogg)$/i);
+    const coverDir = cfg.cover.dir || path.join(this.downloads.dir, "covers");
+    const cover = safeDirStats(coverDir, /\.(png|jpe?g|webp|gif)$/i);
+    const local = safeDirStats(cfg.localMusic.dir || this.downloads.dir, /\.(flac|mp3|m4a|wav|ogg|ape)$/i);
+    const cpu = process.cpuUsage();
+    const hostCpu = (cpu.user + cpu.system) / 1e6 / Math.max(1, process.uptime()) * 100;
+    return {
+      extensionPath: this.ctx.extensionPath,
+      extensionBytes: extension.bytes,
+      cacheBytes: cache.bytes,
+      cacheFiles: cache.files,
+      downloadBytes: download.bytes,
+      downloadFiles: download.files,
+      coverBytes: cover.bytes,
+      coverFiles: cover.files,
+      localBytes: local.bytes,
+      localFiles: local.files,
+      hostRss: process.memoryUsage().rss,
+      hostCpu: Math.min(100, Math.round(hostCpu * 10) / 10),
+    };
+  }
+
   private settingsView(): SettingsView {
     const cfg = getConfig();
     return {
       version: String(this.ctx.extension.packageJSON.version ?? "0.0.0"),
+      stats: this.resourceStats(),
+      showTitle: cfg.status.showTitle,
+      showLike: cfg.status.showLike,
+      showFavorite: cfg.status.showFavorite,
+      showMode: cfg.status.showMode,
+      showNavigation: cfg.status.showNavigation,
+      showBuffer: cfg.status.showBuffer,
+      showQueue: cfg.status.showQueue,
       quality: cfg.quality,
       downloadQuality: cfg.download.quality === "auto" ? "auto" : QUALITY_LABELS[cfg.download.quality] ?? cfg.download.quality,
       downloadDir: this.downloads.dir,
@@ -589,7 +654,7 @@ export class App implements vscode.Disposable {
         if (!track) return;
         const list = Array.isArray(payload.list) && payload.list.length ? (payload.list as Track[]) : undefined;
         const index = Number.isFinite(payload.index) ? Number(payload.index) : undefined;
-        await this.player.playTrack(track, list, index);
+        await this.player.playTrack(track, list, index, payload.source as any);
         if (this.player.state().error) {
           await new Promise((resolve) => setTimeout(resolve, 350));
           await this.ensureAudioHost();
@@ -605,11 +670,11 @@ export class App implements vscode.Disposable {
         const tracks = Array.isArray(payload.tracks) ? (payload.tracks as Track[]) : [];
         if (!tracks.length) return;
         await this.ensureAudioHost();
-        await this.player.setQueueAndPlay(tracks, Number(payload.index ?? 0));
+        await this.player.setQueueAndPlay(tracks, Number(payload.index ?? 0), true, payload.source as any);
         break;
       }
       case "playNext":
-        if (payload.track) this.player.playNext(payload.track as Track);
+        if (payload.track) this.player.playNext(payload.track as Track, payload.source as any);
         break;
       case "playPause":
         await this.ensureAudioHost();
@@ -648,12 +713,12 @@ export class App implements vscode.Disposable {
         await this.setDownloadQuality(payload.quality);
         break;
       case "enqueueTrack":
-        if (payload.track) this.player.addToQueue(payload.track as Track);
+        if (payload.track) this.player.addToQueue(payload.track as Track, payload.source as any);
         break;
       case "enqueuePlaylist": {
         const view = await this.ensurePlaylist(Number(payload.id));
         if (view) {
-          this.player.addManyToQueue(view.tracks);
+          this.player.addManyToQueue(view.tracks, { id: view.playlist.id, name: view.playlist.name, kind: "playlist" });
           this.toast(`已加入队列：${view.tracks.length} 首`, "success");
         }
         break;
@@ -699,6 +764,12 @@ export class App implements vscode.Disposable {
         break;
       case "sleepTimer":
         await this.pickSleepTimer();
+        break;
+      case "setSleepTimer":
+        this.setSleepTimer(Number(payload.minutes ?? 0));
+        break;
+      case "setPlaybackRate":
+        await this.player.setRate(Number(payload.value ?? 1));
         break;
       case "playbackRate":
         await this.pickPlaybackRate();
@@ -897,6 +968,20 @@ export class App implements vscode.Disposable {
       case "restartApp":
         this.restartApp();
         break;
+      case "openDir": {
+        const kind = String(payload.dir ?? "");
+        const cfg = getConfig();
+        const map: Record<string, string> = {
+          cache: cfg.cache.dir || defaultCacheDir(this.ctx),
+          download: this.downloads.dir,
+          cover: cfg.cover.dir || path.join(this.downloads.dir, "covers"),
+          local: cfg.localMusic.dir || this.downloads.dir,
+          extension: this.ctx.extensionPath,
+        };
+        const target = map[kind];
+        if (target) void vscode.env.openExternal(vscode.Uri.file(target));
+        break;
+      }
       case "selectDevice":
         await this.selectDevice();
         break;
@@ -1972,33 +2057,70 @@ export class App implements vscode.Disposable {
     this.mainPanel.post({ type: "toast", kind: "success", message: `封面已保存：${file}` });
   }
 
-  private async pickSleepTimer(): Promise<void> {    if (this.sleepTimer) {
-      clearTimeout(this.sleepTimer);
-      this.sleepTimer = undefined;
+  private setSleepTimer(minutes: number): void {
+    if (!Number.isFinite(minutes) || minutes <= 0) {
+      this.clearSleepTimer();
+      return;
+    }
+    this.clearSleepTimer(false);
+    const ms = Math.round(minutes) * 60 * 1000;
+    this.sleepUntil = Date.now() + ms;
+    this.sleepTimer = setTimeout(() => {
+      this.clearSleepTimer(false);
+      void this.player.sleepStop();
+      this.toast("定时关闭：已暂停播放", "info");
+    }, ms);
+    if (!this.sleepTicker) {
+      this.sleepTicker = setInterval(() => this.updateSleepStatus(), 1000);
+    }
+    this.updateSleepStatus();
+    this.toast(Math.round(minutes) + " 分钟后暂停", "success");
+  }
+
+  private clearSleepTimer(announce = true): void {
+    if (this.sleepTimer) clearTimeout(this.sleepTimer);
+    if (this.sleepTicker) clearInterval(this.sleepTicker);
+    this.sleepTimer = undefined;
+    this.sleepTicker = undefined;
+    this.sleepUntil = undefined;
+    this.status.sleep.hide();
+    if (announce) this.toast("已关闭定时暂停");
+  }
+
+  private updateSleepStatus(): void {
+    if (!this.sleepUntil) {
+      this.status.sleep.hide();
+      return;
+    }
+    const total = Math.ceil(Math.max(0, this.sleepUntil - Date.now()) / 1000);
+    const hours = Math.floor(total / 3600);
+    const minutes = Math.floor((total % 3600) / 60);
+    const seconds = total % 60;
+    this.status.sleep.text =
+      "$(clock) 定时关闭 " + hours + ":" + String(minutes).padStart(2, "0") + ":" + String(seconds).padStart(2, "0");
+    this.status.sleep.tooltip = "定时关闭剩余 " + hours + " 小时 " + minutes + " 分 " + seconds + " 秒\n点击取消";
+    this.status.sleep.command = "neteaseMusic.sleepTimer";
+    this.status.sleep.show();
+  }
+
+  private async pickSleepTimer(): Promise<void> {
+    if (this.sleepUntil) {
+      this.clearSleepTimer();
+      return;
     }
     const picked = await vscode.window.showQuickPick(
       [
-        { label: "关闭定时", minutes: 0 },
         { label: "15 分钟后暂停", minutes: 15 },
         { label: "30 分钟后暂停", minutes: 30 },
         { label: "60 分钟后暂停", minutes: 60 },
         { label: "90 分钟后暂停", minutes: 90 },
       ],
-      { title: "定时关闭", placeHolder: "选择暂停时间" },
+      { title: "定时关闭", placeHolder: "选择暂停时间（侧边栏时钟可自定义分钟）" },
     );
-    if (!picked?.minutes) {
-      this.toast("已关闭定时暂停");
-      return;
-    }
-    this.sleepTimer = setTimeout(() => {
-      this.sleepTimer = undefined;
-      void this.player.pause();
-      this.toast("定时关闭：已暂停播放", "info");
-    }, picked.minutes * 60 * 1000);
-    this.toast(`${picked.label}`, "success");
+    if (picked) this.setSleepTimer(picked.minutes);
   }
 
-  private async pickPlaybackRate(): Promise<void> {
+private async pickPlaybackRate(): Promise<void> {
     const picked = await vscode.window.showQuickPick(
       [
         { label: "0.75x", value: 0.75 },
@@ -2119,9 +2241,35 @@ export class App implements vscode.Disposable {
     register("neteaseMusic.openMain", () => this.openMain());
     register("neteaseMusic.openNowPlaying", () => this.openNow());
     register("neteaseMusic.openQueue", () => this.openQueue());
+    register("neteaseMusic.toggleQueue", () => {
+      this.mainPanel.createOrShow();
+      if (this.mainPanel.isReady) this.mainPanel.post({ type: "toggleQueue" });
+      else this.openQueue();
+    });
     register("neteaseMusic.openMyProfile", () => this.openMyProfile());
     register("neteaseMusic.openSettingsPanel", () => this.openSettings("account"));
     register("neteaseMusic.playlist.open", async (id: number) => this.openPlaylist(Number(id)));
+    register("neteaseMusic.like", async () => {
+      const id = this.player.current?.id ?? 0;
+      if (id <= 0) return;
+      const liked = await this.player.toggleLike(id);
+      this.toast(liked ? "已添加到喜欢的音乐" : "已取消喜欢", "success");
+    });
+    register("neteaseMusic.favorite", async () => {
+      const track = this.player.current;
+      if (!track) return;
+      await this.openFavorite(track.id);
+    });
+    register("neteaseMusic.mode", async () => {
+      const modes = ["order", "shuffle", "repeatOne", "repeat"] as const;
+      const current = this.player.state().mode;
+      const next = modes[(modes.indexOf(current) + 1) % modes.length];
+      await this.player.setMode(next);
+      this.toast(`播放模式：${next}`, "success");
+    });
+    register("neteaseMusic.pause", async () => {
+      await this.player.pause();
+    });
     register("neteaseMusic.playPause", async () => {
       await this.ensureAudioHost();
       await this.player.toggle();
@@ -2138,6 +2286,7 @@ export class App implements vscode.Disposable {
     register("neteaseMusic.volumeDown", () => this.player.setVolume(this.player.state().volume - 0.05));
     register("neteaseMusic.mute", () => this.toggleMute());
     register("neteaseMusic.qualityPicker", () => this.pickQuality());
+    register("neteaseMusic.sleepTimer", () => this.pickSleepTimer());
     register("neteaseMusic.volumePicker", () => this.pickVolume());
     register("neteaseMusic.search", async () => {
       const query = await vscode.window.showInputBox({ prompt: "搜索歌曲", placeHolder: "歌曲 / 歌手 / 专辑" });
@@ -2257,6 +2406,15 @@ export class App implements vscode.Disposable {
     s.previous.text = "$(chevron-left)";
     s.previous.tooltip = "上一首";
     s.previous.command = "neteaseMusic.previous";
+    s.like.text = "$(heart)";
+    s.like.tooltip = "喜欢当前歌曲";
+    s.like.command = "neteaseMusic.like";
+    s.favorite.text = "$(star)";
+    s.favorite.tooltip = "收藏到歌单";
+    s.favorite.command = "neteaseMusic.favorite";
+    s.mode.text = "$(list-ordered)";
+    s.mode.tooltip = "切换播放模式";
+    s.mode.command = "neteaseMusic.mode";
     s.play.text = "$(play)";
     s.play.tooltip = "播放 / 暂停";
     s.play.command = "neteaseMusic.playPause";
@@ -2277,7 +2435,7 @@ export class App implements vscode.Disposable {
     s.now.command = "neteaseMusic.openNowPlaying";
     s.queue.text = "$(list-unordered)";
     s.queue.tooltip = "播放队列";
-    s.queue.command = "neteaseMusic.openQueue";
+    s.queue.command = "neteaseMusic.toggleQueue";
     s.settings.text = "$(settings-gear)";
     s.settings.tooltip = "网易云音乐设置";
     s.settings.command = "neteaseMusic.openSettingsPanel";
@@ -2296,10 +2454,12 @@ export class App implements vscode.Disposable {
   }
 
   private updateStatus(): void {
+    this.updateSleepStatus();
     const state = this.player.state();
     const track = state.track;
     if (!track) {
       this.status.idle.hide();
+      this.status.buffer.hide();
       this.status.previous.show();
       this.status.play.show();
       this.status.next.show();
@@ -2318,9 +2478,11 @@ export class App implements vscode.Disposable {
       this.status.quality.tooltip = `当前音质：${configured}（未在播放）\n点击切换`;
       this.status.volume.text = `${state.volume <= 0.01 ? "$(mute)" : "$(unmute)"} ${Math.round(state.volume * 100)}%`;
       this.status.volume.tooltip = `音量 ${Math.round(state.volume * 100)}%\n点击调节`;
+      this.applyStatusVisibility(state);
       return;
     }
     this.status.idle.hide();
+    this.status.buffer.show();
     this.status.previous.show();
     this.status.play.show();
     this.status.next.show();
@@ -2330,12 +2492,13 @@ export class App implements vscode.Disposable {
     this.status.now.show();
     this.status.queue.show();
     this.status.settings.show();
-    this.status.play.text = state.loading ? "$(loading~spin)" : state.playing ? "$(debug-pause)" : "$(play)";
-    this.status.play.tooltip = state.playing
-      ? "暂停"
-      : state.loading
-        ? `缓冲中…${state.preparing ? ` ${state.preparing}%` : ""}`
-        : "播放";
+    const bufferPercent = state.loading ? Math.max(0, Math.min(100, Math.round(state.preparing || 0))) : 0;
+    this.status.buffer.text = `$(sync) 缓冲 ${String(bufferPercent).padStart(3, " ")}%`;
+    this.status.buffer.tooltip = state.loading ? "正在缓冲当前歌曲" : "缓冲完成";
+    this.status.buffer.show();
+    this.status.play.command = "neteaseMusic.playPause";
+    this.status.play.text = state.playing ? "$(debug-pause)" : "$(play)";
+    this.status.play.tooltip = state.playing ? "暂停" : "播放";
     const artists = track.artists.map((artist) => artist.name).join(" / ");
     const full = `${track.name}${artists ? ` — ${artists}` : ""}`;
     if (full !== this.lastTitle) {
@@ -2348,7 +2511,9 @@ export class App implements vscode.Disposable {
       const cycle = full.length + 3;
       const offset = this.marqueeOffset % cycle;
       const padded = `${full}   ${full}`;
-      label = padded.slice(offset, offset + window);
+      label = padded.slice(offset, offset + window).padEnd(window, "\u3000");
+    } else {
+      label = full.padEnd(window, "\u3000");
     }
     this.status.title.text = `$(music) ${label}`;
     const actual = state.actualQuality && state.actualQuality !== "local"
@@ -2361,6 +2526,34 @@ export class App implements vscode.Disposable {
     this.status.quality.tooltip = `当前音质：${actual}${downgraded ? `（请求 ${requested}，服务端已降级）` : ""}\n点击切换`;
     this.status.volume.text = `${state.volume <= 0.01 ? "$(mute)" : "$(unmute)"} ${Math.round(state.volume * 100)}%`;
     this.status.volume.tooltip = `音量 ${Math.round(state.volume * 100)}%\n点击调节`;
+    this.status.like.text = state.liked ? "$(heart-filled)" : "$(heart)";
+    this.status.like.tooltip = state.liked ? "取消喜欢" : "喜欢当前歌曲";
+    this.status.mode.text =
+      state.mode === "shuffle"
+        ? "随机播放"
+        : state.mode === "repeatOne"
+          ? "单曲循环"
+          : state.mode === "repeat"
+            ? "列表循环"
+            : "顺序播放";
+    this.status.mode.tooltip = "切换播放模式";
+    this.applyStatusVisibility(state);
+  }
+
+  private applyStatusVisibility(state: ReturnType<typeof this.player.state>): void {
+    const st = getConfig().status;
+    const hasTrack = Boolean(state.track);
+    const show = (item: vscode.StatusBarItem, visible: boolean) => (visible ? item.show() : item.hide());
+    show(this.status.buffer, st.showBuffer && hasTrack);
+    show(this.status.like, st.showLike && hasTrack);
+    show(this.status.favorite, st.showFavorite && hasTrack);
+    show(this.status.mode, st.showMode && hasTrack);
+    show(this.status.previous, st.showNavigation && hasTrack);
+    show(this.status.play, st.showNavigation && hasTrack);
+    show(this.status.next, st.showNavigation && hasTrack);
+    show(this.status.queue, st.showQueue && hasTrack);
+    this.status.settings.show();
+    show(this.status.title, st.showTitle);
   }
 
   private async pickQuality(): Promise<void> {

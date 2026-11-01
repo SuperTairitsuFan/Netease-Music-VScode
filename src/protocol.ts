@@ -36,6 +36,12 @@ export interface OutputView {
   unavailableReason?: string;
 }
 
+export interface PlaybackSource {
+  id: number;
+  name: string;
+  kind?: "playlist" | "album" | "artist" | "daily" | "other";
+}
+
 export interface PlayerState {
   track: Track | null;
   playing: boolean;
@@ -60,11 +66,35 @@ export interface PlayerState {
   output: OutputView;
   queueLength: number;
   index: number;
+  queueSources: Array<PlaybackSource | null>;
   preparing: number;
+}
+
+export interface ResourceStatsView {
+  extensionPath: string;
+  extensionBytes: number;
+  cacheBytes: number;
+  cacheFiles: number;
+  downloadBytes: number;
+  downloadFiles: number;
+  coverBytes: number;
+  coverFiles: number;
+  localBytes: number;
+  localFiles: number;
+  hostRss: number;
+  hostCpu: number;
 }
 
 export interface SettingsView {
   version: string;
+  stats: ResourceStatsView;
+  showTitle: boolean;
+  showLike: boolean;
+  showFavorite: boolean;
+  showMode: boolean;
+  showNavigation: boolean;
+  showBuffer: boolean;
+  showQueue: boolean;
   quality: Quality;
   downloadQuality: string;
   downloadDir: string;
@@ -293,6 +323,7 @@ export interface InitState {
   player: PlayerState;
   account: Account | null;
   queue: Track[];
+  queueSources: Array<PlaybackSource | null>;
   settings: SettingsView;
   page: PageView;
   panels: Record<string, boolean>;
@@ -340,7 +371,8 @@ export type HostMessage =
   | { type: "account"; account: Account | null }
   | { type: "sidebar"; state: SidebarState }
   | { type: "settings"; settings: SettingsView }
-  | { type: "queue"; tracks: Track[]; index: number }
+  | { type: "queue"; tracks: Track[]; index: number; sources?: Array<PlaybackSource | null> }
+  | { type: "toggleQueue" }
   | { type: "queuePopup"; open: boolean }
   | { type: "downloads"; tasks: DownloadTaskView[] }
   | { type: "components"; items: ComponentView[]; native: NativeStatusView }
@@ -362,7 +394,10 @@ export type HostMessage =
 
 export type WebviewCommand =
   | "ready"
+  | "openDir"
   | "restartApp"
+  | "setSleepTimer"
+  | "setPlaybackRate"
   | "nav"
   | "openPlaylist"
   | "openSongDetail"

@@ -36,6 +36,55 @@ const NAV_ITEMS: Array<{ key: string; label: string; icon: string; nav: string }
   { key: "following", label: "关注", icon: "users", nav: "following" },
 ];
 
+function hideQualityPop(): void {
+  const pop = qs<HTMLElement>("#quality-pop");
+  if (pop) pop.hidden = true;
+}
+
+function hideSleepPop(): void {
+  const pop = qs<HTMLElement>("#sleep-pop");
+  if (pop) pop.hidden = true;
+}
+
+function confirmSleepTimer(): void {
+  const hoursInput = qs<HTMLInputElement>("#sleep-hours");
+  const minutesInput = qs<HTMLInputElement>("#sleep-minutes");
+  const error = qs<HTMLElement>("#sleep-error");
+  const hoursRaw = hoursInput?.value.trim() ?? "0";
+  const minutesRaw = minutesInput?.value.trim() ?? "0";
+  const hours = hoursRaw === "" ? 0 : Number(hoursRaw);
+  const minutes = minutesRaw === "" ? 0 : Number(minutesRaw);
+  if (!/^\d+$/.test(hoursRaw || "0") || !/^\d+$/.test(minutesRaw || "0") || hours < 0 || minutes < 0 || hours * 60 + minutes <= 0) {
+    if (error) error.style.display = "block";
+    (minutesInput ?? hoursInput)?.focus();
+    (minutesInput ?? hoursInput)?.select();
+    return;
+  }
+  if (error) error.style.display = "none";
+  send("setSleepTimer", { minutes: hours * 60 + minutes });
+  hideSleepPop();
+}
+
+function hideRatePop(): void {
+  const pop = qs<HTMLElement>("#rate-pop");
+  if (pop) pop.hidden = true;
+}
+
+function confirmRate(): void {
+  const input = qs<HTMLInputElement>("#rate-input");
+  const error = qs<HTMLElement>("#rate-error");
+  const value = Number(input?.value.trim() ?? "");
+  if (!Number.isFinite(value) || value < 0.5 || value > 3) {
+    if (error) error.style.display = "block";
+    input?.focus();
+    input?.select();
+    return;
+  }
+  if (error) error.style.display = "none";
+  send("setPlaybackRate", { value });
+  hideRatePop();
+}
+
 function boot(): void {
   app.innerHTML = `<div class="sidebar">
     <div class="sb-head">
@@ -51,12 +100,47 @@ function boot(): void {
       <button class="icon-btn" data-act="sleepTimer" title="定时关闭">${icon("clock", 14)}</button>
       <button class="icon-btn rate-btn" data-act="playbackRate" title="播放速度">1.0x</button>
       <button class="icon-btn" data-act="volumePopup" title="音量（双击静音）">${icon("volume", 14)}</button>
+      <div class="sleep-pop quality-pop" id="quality-pop" hidden>
+        <div class="sleep-title">音质调节<button class="icon-btn quality-close" data-act="closeQuality" title="关闭">×</button></div>
+        <button class="quality-option" data-act="setQuality" data-quality="standard"><span>标准</span><span class="quality-desc">128 kbps</span></button>
+        <button class="quality-option" data-act="setQuality" data-quality="exhigh"><span>极高</span><span class="quality-desc">320 kbps</span></button>
+        <button class="quality-option" data-act="setQuality" data-quality="lossless"><span>无损</span><span class="quality-desc">FLAC 16-bit</span></button>
+        <button class="quality-option" data-act="setQuality" data-quality="hires"><span>高解析度无损</span><span class="quality-desc">Hi-Res 24-bit</span></button>
+        <button class="quality-option" data-act="setQuality" data-quality="jyeffect"><span>高清臻音</span><span class="quality-desc">SVIP 24-bit</span></button>
+        <button class="quality-option" data-act="setQuality" data-quality="jymaster"><span>超清母带</span><span class="quality-desc">SVIP 24-bit</span></button>
+      </div>
+      <div class="sleep-pop" id="sleep-pop" hidden>
+        <div class="sleep-title">定时关闭</div>
+        <div class="sleep-inputs">
+          <label>时<input id="sleep-hours" type="number" min="0" step="1" inputmode="numeric" value="0" autocomplete="off"></label>
+          <label>分<input id="sleep-minutes" type="number" min="0" step="1" inputmode="numeric" value="0" autocomplete="off"></label>
+        </div>
+        <div class="sleep-error" id="sleep-error">请输入非负整数，分钟可超过 60</div>
+        <div class="sleep-actions"><button class="btn small" data-act="sleepCancel">取消</button><button class="btn small primary" data-act="sleepConfirm">确定</button></div>
+      </div>
     </div>
+      <div class="sleep-pop" id="rate-pop" hidden>
+        <div class="sleep-title">播放速度</div>
+        <input id="rate-input" type="number" min="0.5" max="3" step="0.05" inputmode="decimal" value="1" autocomplete="off">
+        <div class="sleep-error" id="rate-error">请输入 0.5 到 3.0 之间的数字</div>
+        <div class="sleep-actions"><button class="btn small" data-act="rateCancel">取消</button><button class="btn small primary" data-act="rateConfirm">确定</button></div>
+      </div>
     <div class="volume-pop" id="volume-pop" hidden>
       <input id="volume-range" type="range" min="0" max="100" step="1" value="80" />
       <span id="volume-label">80%</span>
     </div>
   </div>`;
+  document.addEventListener("keydown", (event) => {
+    const input = event.target as HTMLElement | null;
+    if (input?.id === "rate-input") {
+      if (event.key === "Enter") { event.preventDefault(); confirmRate(); }
+      if (event.key === "Escape") { event.preventDefault(); hideRatePop(); }
+    }
+    if (input?.id === "sleep-minutes" || input?.id === "sleep-hours") {
+      if (event.key === "Enter") { event.preventDefault(); confirmSleepTimer(); }
+      if (event.key === "Escape") { event.preventDefault(); hideSleepPop(); }
+    }
+  });
   document.addEventListener("click", onClick, true);
   document.addEventListener("input", (event) => {
     const target = event.target as HTMLInputElement | null;
@@ -143,16 +227,84 @@ function onClick(event: Event): void {
     case "lyricsOverlay":
       send("openNow");
       break;
-    case "quality":
-      send("qualityPicker");
+    case "quality": {
+      const volume = qs<HTMLElement>("#volume-pop");
+      if (volume) volume.hidden = true;
+      hideSleepPop();
+      hideRatePop();
+      const pop = qs<HTMLElement>("#quality-pop");
+      if (!pop) break;
+      pop.hidden = !pop.hidden;
+      if (!pop.hidden) {
+        for (const btn of qsa<HTMLElement>("#quality-pop .quality-option")) {
+          btn.classList.toggle("current", btn.dataset.quality === player?.quality);
+        }
+      }
       break;
-    case "sleepTimer":
-      send("sleepTimer");
+    }
+    case "closeQuality":
+      hideQualityPop();
       break;
-    case "playbackRate":
-      send("playbackRate");
+    case "setQuality":
+      send("quality", { quality: el.dataset.quality });
+      hideQualityPop();
+      break;
+    case "sleepTimer": {
+      const volume = qs<HTMLElement>("#volume-pop");
+      if (volume) volume.hidden = true;
+      hideRatePop();
+      hideQualityPop();
+      const pop = qs<HTMLElement>("#sleep-pop");
+      if (!pop) break;
+      pop.hidden = !pop.hidden;
+      if (!pop.hidden) {
+        const input = qs<HTMLInputElement>("#sleep-minutes");
+        const hours = qs<HTMLInputElement>("#sleep-hours");
+        if (hours) hours.value = "0";
+        const mins = qs<HTMLInputElement>("#sleep-minutes");
+        if (mins) mins.value = "0";
+        input?.focus();
+        input?.select();
+      }
+      break;
+    }
+    case "sleepCancel":
+      hideSleepPop();
+      break;
+    case "sleepConfirm":
+      confirmSleepTimer();
+      break;
+    case "playbackRate": {
+      if (player?.output?.kind === "native") {
+        toast("原生音频输出不支持变速，请切换到 WebAudio", "info");
+        break;
+      }
+      const sleep = qs<HTMLElement>("#sleep-pop");
+      if (sleep) sleep.hidden = true;
+      const volume = qs<HTMLElement>("#volume-pop");
+      if (volume) volume.hidden = true;
+      const pop = qs<HTMLElement>("#rate-pop");
+      if (!pop) break;
+      pop.hidden = !pop.hidden;
+      if (!pop.hidden) {
+        const input = qs<HTMLInputElement>("#rate-input");
+        if (input) input.value = String(player?.rate ?? 1);
+        input?.focus();
+        input?.select();
+      }
+      break;
+    }
+    case "rateCancel":
+      hideRatePop();
+      break;
+    case "rateConfirm":
+      confirmRate();
       break;
     case "volumePopup": {
+      const sleep = qs<HTMLElement>("#sleep-pop");
+      if (sleep) sleep.hidden = true;
+      hideRatePop();
+      hideQualityPop();
       const pop = qs<HTMLElement>("#volume-pop");
       if (pop) pop.hidden = !pop.hidden;
       break;
@@ -292,7 +444,12 @@ window.addEventListener("message", (event: MessageEvent<HostMessage>) => {
       player = msg.state;
       {
         const rate = qs<HTMLElement>(".rate-btn");
-        if (rate) rate.textContent = `${(player.rate ?? 1).toFixed(2).replace(/0$/, "")}x`;
+        if (rate) {
+          rate.textContent = `${(player.rate ?? 1).toFixed(2).replace(/0$/, "")}x`;
+          const disabled = player.output?.kind === "native";
+          rate.classList.toggle("disabled", disabled);
+          rate.title = disabled ? "原生音频输出不支持变速" : "播放速度";
+        }
         const quality = qs<HTMLElement>("#side-quality");
         if (quality) {
           const labels: Record<string, string> = {

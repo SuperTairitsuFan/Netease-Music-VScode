@@ -6,7 +6,7 @@ import type { SessionManager } from "../auth/session";
 import type { MusicConfig, PlayMode, Quality } from "../config";
 import { QUALITY_LABELS } from "../config";
 import type { LyricPayload, SongUrlResult, Track } from "../api/types";
-import type { HostMessage, LoadRequest, NativeFormatView, OutputView, PlayerState, WebviewMessage } from "../protocol";
+import type { HostMessage, LoadRequest, NativeFormatView, OutputView, PlaybackSource, PlayerState, WebviewMessage } from "../protocol";
 import { downloadToFile, downloadToGrowingFile } from "../download/fetcher";
 import { log } from "../util/logger";
 import type { AudioFormat, ComponentStore } from "./components";
@@ -32,6 +32,7 @@ interface PersistedPlayback {
 
 export class PlayerService implements vscode.Disposable {
   private queue: Track[] = [];
+  private queueSources: Array<PlaybackSource | null> = [];
   private index = -1;
   private queueDirty = false;
   private playing = false;
@@ -90,7 +91,17 @@ export class PlayerService implements vscode.Disposable {
     private readonly session: SessionManager,
     private readonly components: ComponentStore,
     private readonly getConfig: () => MusicConfig,
-  ) {}
+  ) {
+    void this.pruneCacheNow();
+  }
+
+  async pruneCacheNow(): Promise<void> {
+    const cfg = this.getConfig();
+    const dir = cfg.cache.enabled
+      ? cfg.cache.dir || path.join(this.ctx.globalStorageUri.fsPath, "cache", "audio")
+      : path.join(this.ctx.globalStorageUri.fsPath, "cache", "audio");
+    await this.pruneCache(dir, Math.max(64, cfg.cache.maxSizeMB) * 1024 * 1024);
+  }
 
   private postFn?: (msg: HostMessage) => void;
   private resourceUriFn?: (filePath: string) => string;
@@ -116,6 +127,10 @@ export class PlayerService implements vscode.Disposable {
 
   getQueue(): Track[] {
     return this.queue;
+  }
+
+  getQueueSources(): Array<PlaybackSource | null> {
+    return this.queueSources;
   }
 
   getRecent(): Track[] {
@@ -161,6 +176,7 @@ export class PlayerService implements vscode.Disposable {
       output: this.output,
       queueLength: this.queue.length,
       index: this.index,
+      queueSources: this.queueSources,
       preparing: this.preparing,
     };
   }
@@ -214,7 +230,7 @@ export class PlayerService implements vscode.Disposable {
           this.index = Math.min(index, tracks.length - 1);
           this.currentSong = this.queue[this.index] ?? null;
           this.duration = this.currentSong ? this.currentSong.duration / 1000 : 0;
-          this.post({ type: "queue", tracks: this.queue, index: this.index });
+          this.post({ type: "queue", tracks: this.queue, index: this.index, sources: this.queueSources });
           this.emit();
           if (cfg.playback.autoPlay && this.currentSong) void this.start(this.currentSong, 0);
         }
@@ -334,11 +350,12 @@ export class PlayerService implements vscode.Disposable {
 
   // ------------------------------------------------------------ playback
 
-  async setQueueAndPlay(tracks: Track[], startIndex: number, autoplay = true): Promise<void> {
+  async setQueueAndPlay(tracks: Track[], startIndex: number, autoplay = true, source?: PlaybackSource | null): Promise<void> {
     if (!tracks.length) return;
     this.queue = tracks;
+    this.queueSources = tracks.map(() => source ?? null);
     this.index = Math.max(0, Math.min(startIndex, tracks.length - 1));
-    this.post({ type: "queue", tracks: this.queue, index: this.index });
+    this.post({ type: "queue", tracks: this.queue, index: this.index, sources: this.queueSources });
     this.persistQueue();
     const song = this.queue[this.index];
     if (song) {
@@ -351,18 +368,22 @@ export class PlayerService implements vscode.Disposable {
     }
   }
 
-  async playTrack(track: Track, list?: Track[], listIndex?: number): Promise<void> {
+  async playTrack(track: Track, list?: Track[], listIndex?: number, source?: PlaybackSource | null): Promise<void> {
     let targetIndex = this.queue.findIndex((t) => t.id === track.id);
     if (list && list.length) {
       const idx = listIndex ?? list.findIndex((t) => t.id === track.id);
       this.queue = list;
+      this.queueSources = list.map(() => source ?? null);
       targetIndex = Math.max(0, idx);
     } else if (targetIndex < 0) {
       this.queue = [track];
+      this.queueSources = [source ?? null];
       targetIndex = 0;
+    } else if (source) {
+      this.queueSources[targetIndex] = source;
     }
     this.index = targetIndex;
-    this.post({ type: "queue", tracks: this.queue, index: this.index });
+    this.post({ type: "queue", tracks: this.queue, index: this.index, sources: this.queueSources });
     this.persistQueue();
     await this.start(track, 0);
   }
@@ -370,7 +391,7 @@ export class PlayerService implements vscode.Disposable {
   async playAt(index: number): Promise<void> {
     if (index < 0 || index >= this.queue.length) return;
     this.index = index;
-    this.post({ type: "queue", tracks: this.queue, index: this.index });
+    this.post({ type: "queue", tracks: this.queue, index: this.index, sources: this.queueSources });
     this.persistQueue();
     await this.start(this.queue[index], 0);
   }
@@ -392,7 +413,7 @@ export class PlayerService implements vscode.Disposable {
     this.recordRecent(track);
     this.queue = [track];
     this.index = 0;
-    this.post({ type: "queue", tracks: this.queue, index: this.index });
+    this.post({ type: "queue", tracks: this.queue, index: this.index, sources: this.queueSources });
     this.post({
       type: "load",
       request: {
@@ -409,11 +430,13 @@ export class PlayerService implements vscode.Disposable {
   }
 
   /** Insert a track immediately after the current one ("下一首播放"). */
-  playNext(track: Track): void {
+  playNext(track: Track, source?: PlaybackSource | null): void {
     const at = this.index >= 0 ? this.index + 1 : this.queue.length;
-    this.queue.splice(Math.min(at, this.queue.length), 0, track);
+    const insertAt = Math.min(at, this.queue.length);
+    this.queue.splice(insertAt, 0, track);
+    this.queueSources.splice(insertAt, 0, source ?? null);
     if (this.index < 0) this.index = 0;
-    this.post({ type: "queue", tracks: this.queue, index: this.index });
+    this.post({ type: "queue", tracks: this.queue, index: this.index, sources: this.queueSources });
     this.persistQueue();
     this.emit();
   }
@@ -455,20 +478,11 @@ export class PlayerService implements vscode.Disposable {
     if (this.playing) {
       this.playing = false;
       this.post({ type: "control", action: "pause" });
-      if (this.streamNative) {
-        void this.stopNative();
-      } else {
-        this.nativeSession?.pause().catch(() => undefined);
-      }
+      this.nativeSession?.pause().catch(() => undefined);
       this.emit();
       return;
     }
-    if (this.streamNative && this.currentSong) {
-      void this.start(this.currentSong, this.position);
-      return;
-    }
     if (this.nativeSession) {
-      this.post({ type: "control", action: "play" });
       this.nativeSession.resume().catch(() => undefined);
       this.playing = true;
       this.emit();
@@ -484,8 +498,14 @@ export class PlayerService implements vscode.Disposable {
   }
 
   /** Pause without toggling back on (used when background playback is off). */
+  async sleepStop(): Promise<void> {
+    this.post({ type: "control", action: "pause" });
+    if (this.nativeSession) await this.stopNative();
+    this.playing = false;
+    this.emit();
+  }
+
   async pause(): Promise<void> {
-    if (!this.playing) return;
     this.playing = false;
     this.post({ type: "control", action: "pause" });
     if (this.nativeSession) await this.nativeSession.pause().catch(() => undefined);
@@ -604,38 +624,29 @@ export class PlayerService implements vscode.Disposable {
     } else if (this.mode === "repeatOne" && !userInitiated) {
       nextIndex = this.index;
     } else {
-      nextIndex = this.index + 1;
-      if (nextIndex >= this.queue.length) {
-        if (this.mode === "repeat" || userInitiated) nextIndex = 0;
-        else {
-          await this.stop();
-          return;
-        }
-      }
+      nextIndex = (this.index + 1) % this.queue.length;
     }
     await this.playAt(nextIndex);
   }
 
   async previous(): Promise<void> {
     if (!this.queue.length) return;
-    if (this.position > 3) {
-      await this.seek(0);
-      return;
-    }
-    const prev = this.index - 1 < 0 ? (this.mode === "repeat" ? this.queue.length - 1 : 0) : this.index - 1;
+    const prev = this.index <= 0 ? this.queue.length - 1 : this.index - 1;
     await this.playAt(prev);
   }
 
-  addToQueue(track: Track): void {
+  addToQueue(track: Track, source?: PlaybackSource | null): void {
     this.queue.push(track);
-    this.post({ type: "queue", tracks: this.queue, index: this.index });
+    this.queueSources.push(source ?? null);
+    this.post({ type: "queue", tracks: this.queue, index: this.index, sources: this.queueSources });
     this.persistQueue();
     this.emit();
   }
 
-  addManyToQueue(tracks: Track[]): void {
+  addManyToQueue(tracks: Track[], source?: PlaybackSource | null): void {
     this.queue.push(...tracks);
-    this.post({ type: "queue", tracks: this.queue, index: this.index });
+    for (let i = 0; i < tracks.length; i += 1) this.queueSources.push(source ?? null);
+    this.post({ type: "queue", tracks: this.queue, index: this.index, sources: this.queueSources });
     this.persistQueue();
     this.emit();
   }
@@ -643,9 +654,10 @@ export class PlayerService implements vscode.Disposable {
   removeFromQueue(index: number): void {
     if (index < 0 || index >= this.queue.length) return;
     this.queue.splice(index, 1);
+    this.queueSources.splice(index, 1);
     if (index < this.index) this.index -= 1;
     else if (index === this.index) this.index = Math.min(this.index, this.queue.length - 1);
-    this.post({ type: "queue", tracks: this.queue, index: this.index });
+    this.post({ type: "queue", tracks: this.queue, index: this.index, sources: this.queueSources });
     this.persistQueue();
     this.emit();
   }
@@ -653,6 +665,7 @@ export class PlayerService implements vscode.Disposable {
   clearQueue(): void {
     void this.stop();
     this.queue = [];
+    this.queueSources = [];
     this.index = -1;
     this.currentSong = null;
     this.post({ type: "queue", tracks: [], index: -1 });
@@ -886,6 +899,29 @@ export class PlayerService implements vscode.Disposable {
     return undefined;
   }
 
+  private async pruneCache(dir: string, maxBytes: number, keep?: string): Promise<void> {
+    try {
+      const names = await fs.readdir(dir);
+      const entries: Array<{ path: string; size: number; at: number }> = [];
+      for (const name of names) {
+        if (!/\.(flac|mp3)$/i.test(name)) continue;
+        const full = path.join(dir, name);
+        if (keep && path.resolve(full) === path.resolve(keep)) continue;
+        const stat = await fs.stat(full).catch(() => null);
+        if (stat?.isFile()) entries.push({ path: full, size: stat.size, at: stat.mtimeMs });
+      }
+      let total = entries.reduce((sum, item) => sum + item.size, 0);
+      entries.sort((a, b) => a.at - b.at);
+      for (const item of entries) {
+        if (total <= maxBytes) break;
+        await fs.rm(item.path, { force: true }).catch(() => undefined);
+        total -= item.size;
+      }
+    } catch {
+      /* cache directory missing */
+    }
+  }
+
   private async ensureAudioFile(
     song: Track,
     resolved: SongUrlResult,
@@ -919,6 +955,8 @@ export class PlayerService implements vscode.Disposable {
     });
     this.preparing = 100;
     this.emit();
+    const maxBytes = Math.max(64, this.getConfig().cache.maxSizeMB) * 1024 * 1024;
+    void this.pruneCache(path.dirname(file), maxBytes, file);
     return file;
   }
 
@@ -1051,6 +1089,8 @@ export class PlayerService implements vscode.Disposable {
       const done = await fs.readFile(g.donePath, "utf8").catch(() => "");
       if (done.trim() === "done") {
         await fs.rename(g.partPath, g.finalPath).catch(() => undefined);
+        const maxBytes = Math.max(64, this.getConfig().cache.maxSizeMB) * 1024 * 1024;
+        void this.pruneCache(path.dirname(g.finalPath), maxBytes, g.finalPath);
       }
       await fs.rm(g.donePath, { force: true }).catch(() => undefined);
     })();

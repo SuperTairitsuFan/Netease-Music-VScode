@@ -6,6 +6,7 @@
 #include <string.h>
 #if !defined(_WIN32)
 #include <strings.h>
+#include <pthread.h>
 #endif
 
 #if defined(_WIN32)
@@ -74,6 +75,43 @@ static drflac_bool32 grow_tell(void *user, drflac_int64 *cursor) {
   if (pos < 0) return DRFLAC_FALSE;
   *cursor = (drflac_int64)pos;
   return DRFLAC_TRUE;
+}
+
+static volatile int g_pause = 0;
+static volatile int g_stop = 0;
+
+static void *control_thread_main(void *arg) {
+  (void)arg;
+  unsigned char header[5];
+  while (fread(header, 1, 5, stdin) == 5) {
+    unsigned int type = header[0];
+    unsigned int len = (unsigned int)header[1] | ((unsigned int)header[2] << 8) |
+                       ((unsigned int)header[3] << 16) | ((unsigned int)header[4] << 24);
+    char *payload = len ? (char *)malloc(len + 1) : NULL;
+    if (payload) {
+      if (fread(payload, 1, len, stdin) != len) { free(payload); break; }
+      payload[len] = '\0';
+    }
+    if (type == 3) g_stop = 1;
+    if (type == 1 && payload) {
+      if (strstr(payload, "\"pause\"")) g_pause = 1;
+      else if (strstr(payload, "\"resume\"") || strstr(payload, "\"play\"")) g_pause = 0;
+      else if (strstr(payload, "\"stop\"")) g_stop = 1;
+    }
+    free(payload);
+    if (g_stop) break;
+  }
+  return NULL;
+}
+
+static void start_control_thread(void) {
+#if defined(_WIN32)
+  HANDLE thread = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)control_thread_main, NULL, 0, NULL);
+  if (thread) CloseHandle(thread);
+#else
+  pthread_t thread;
+  if (pthread_create(&thread, NULL, control_thread_main, NULL) == 0) pthread_detach(thread);
+#endif
 }
 
 int naoe_play_file(const char *path, const char *backend_name, int start_ms, int growing, const char *done_path, int exclusive, int bits, const char *device) {
@@ -166,6 +204,7 @@ int naoe_play_file(const char *path, const char *backend_name, int start_ms, int
            backend->name, rate, channels, rate, channels, buffer_frames);
   emit_line(line);
   emit_line("{\"event\":\"started\"}");
+  start_control_thread();
   if (start_ms > 0) {
     uint64_t frame = (uint64_t)((double)rate * start_ms / 1000.0);
     if (is_mp3) drmp3_seek_to_pcm_frame(&mp3, frame);
@@ -183,7 +222,17 @@ int naoe_play_file(const char *path, const char *backend_name, int start_ms, int
   uint64_t played = 0;
   uint64_t last_report = naoe_now_ms();
   int failed = 0;
+  int paused_state = 0;
   for (;;) {
+    if (g_stop) break;
+    if (g_pause != paused_state) {
+      paused_state = g_pause;
+      if (backend->pause) backend->pause(handle, paused_state);
+    }
+    if (paused_state) {
+      naoe_sleep_ms(10);
+      continue;
+    }
     uint64_t got = 0;
     if (is_mp3) {
       got = drmp3_read_pcm_frames_f32(&mp3, chunk_frames, tmp);
