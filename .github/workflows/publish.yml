@@ -43,7 +43,6 @@ jobs:
             test -f "$file" || { echo "Missing $file"; exit 1; }
             echo "Publishing $target"
             npx --yes @vscode/vsce@4 publish \
-              --oidc \
-              --packagePath "$file" \
-              --target "$target"
+                --oidc \
+                --packagePath "$file"
           done
