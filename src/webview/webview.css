@@ -3399,3 +3399,5 @@ svg {
 .sb-footer { justify-content: flex-start; }
 .sb-footer .icon-btn { flex: 0 0 auto; }
 .volume-pop { left: 8px; right: auto; width: 56px; max-width: 56px; }
+
+.shortcut-input:disabled { opacity: .45; cursor: not-allowed; }

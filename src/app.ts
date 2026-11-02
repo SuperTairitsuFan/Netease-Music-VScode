@@ -2506,6 +2506,7 @@ private async pickPlaybackRate(): Promise<void> {
   }
 
   private async setShortcut(id: string, value: string): Promise<void> {
+    if (!id.startsWith("playPause")) return;
     const saved = { ...(this.ctx.globalState.get<Record<string, string>>("neteaseMusic.shortcuts") ?? {}) };
     saved[id] = value.trim();
     await this.ctx.globalState.update("neteaseMusic.shortcuts", saved);
@@ -2517,6 +2518,7 @@ private async pickPlaybackRate(): Promise<void> {
     const values = this.shortcutValues();
     const entries: string[] = [];
     for (const def of SHORTCUT_DEFS) {
+      if (def.id !== "playPause") continue;
       const local = values[def.id];
       const global = values[def.id + "Global"];
       if (local) entries.push(`  { "key": "${local.toLowerCase()}", "command": "${def.command}", "when": "activeWebviewPanelId == 'neteaseMusic.main'" }`);
