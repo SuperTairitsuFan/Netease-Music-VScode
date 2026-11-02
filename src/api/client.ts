@@ -627,8 +627,25 @@ export class NeteaseClient {
     return Number(data.id ?? data.playlist?.id ?? 0);
   }
 
+  async updatePlaylistCover(id: number, filePath: string): Promise<void> {
+    const { readFile } = await import("node:fs/promises");
+    const data = await readFile(filePath);
+    const form = new FormData();
+    form.append("id", String(id));
+    form.append("imgFile", new Blob([new Uint8Array(data)]), "cover.jpg");
+    const csrf = /(?:^|;\s*)__csrf=([^;]+)/.exec(this.http.cookieHeader())?.[1] ?? "";
+    if (csrf) form.append("csrf_token", csrf);
+    const res = await fetch("https://music.163.com/api/playlist/cover/update", {
+      method: "POST",
+      headers: { Cookie: this.http.cookieHeader() },
+      body: form,
+    });
+    const json = (await res.json()) as { code?: number; message?: string; msg?: string };
+    requireOk(json, "更换歌单封面");
+  }
+
   async deletePlaylist(id: number): Promise<void> {
-    const data = await this.http.post<{ code: number }>("/api/playlist/delete", { id });
+    const data = await this.http.post<{ code: number }>("/api/playlist/delete", { pid: id });
     requireOk(data, "删除歌单");
   }
 

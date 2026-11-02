@@ -3258,7 +3258,8 @@ svg {
 .sidebar { position: relative; }
 .volume-pop {
   position: absolute;
-  right: 8px;
+  left: 8px;
+  right: auto;
   bottom: 42px;
   z-index: 40;
   display: flex;
@@ -3381,3 +3382,9 @@ svg {
 .quality-option:hover, .quality-option.current { background: var(--hover); }
 .quality-option.current span:first-child::before { content: "✓ "; color: var(--red); }
 .quality-desc { color: var(--muted); font-size: 10px; margin-left: 8px; }
+
+.shortcut-card { margin: 10px 16px; padding: 12px; border: 1px solid var(--border); border-radius: 7px; background: var(--bg-soft); }
+.shortcut-title { font-weight: 600; font-size: 13px; margin-bottom: 8px; }
+.shortcut-head, .shortcut-row { display: grid; grid-template-columns: 1fr 180px 180px; gap: 10px; align-items: center; padding: 5px 0; font-size: 12px; }
+.shortcut-head { color: var(--muted); border-bottom: 1px solid var(--border); }
+.shortcut-row input { width: 100%; box-sizing: border-box; padding: 4px 7px; border: 1px solid var(--border); border-radius: 5px; background: var(--bg); color: var(--fg); font-size: 12px; }

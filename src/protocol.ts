@@ -95,6 +95,7 @@ export interface SettingsView {
   showNavigation: boolean;
   showBuffer: boolean;
   showQueue: boolean;
+  shortcuts: Record<string, string>;
   quality: Quality;
   downloadQuality: string;
   downloadDir: string;
@@ -441,6 +442,8 @@ export type WebviewCommand =
   | "volume"
   | "mode"
   | "quality"
+  | "setShortcut"
+  | "choosePlaylistCover"
   | "qualityPicker"
   | "sleepTimer"
   | "playbackRate"

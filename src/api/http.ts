@@ -112,7 +112,7 @@ export class EapiTransport {
     return header;
   }
 
-  private cookieHeader(): string {
+  cookieHeader(): string {
     const parts: string[] = [];
     const manual = this.getConfig().api.cookie.trim();
     if (manual) parts.push(manual.replace(/;\s*$/, ""));

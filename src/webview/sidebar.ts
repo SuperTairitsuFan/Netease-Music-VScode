@@ -96,6 +96,7 @@ function boot(): void {
     </div>
     <div class="sb-scroll" id="sb-scroll"></div>
     <div class="sb-footer">
+      <button class="icon-btn" data-act="volumePopup" title="音量（双击静音）">${icon("volume", 14)}</button>
       <button class="icon-btn quality-btn" data-act="quality" title="音质调节">${icon("music", 14)}<span id="side-quality">极高</span></button>
       <button class="icon-btn" data-act="sleepTimer" title="定时关闭">${icon("clock", 14)}</button>
       <button class="icon-btn rate-btn" data-act="playbackRate" title="播放速度">1.0x</button>
@@ -283,6 +284,7 @@ function onClick(event: Event): void {
       if (sleep) sleep.hidden = true;
       const volume = qs<HTMLElement>("#volume-pop");
       if (volume) volume.hidden = true;
+      hideQualityPop();
       const pop = qs<HTMLElement>("#rate-pop");
       if (!pop) break;
       pop.hidden = !pop.hidden;

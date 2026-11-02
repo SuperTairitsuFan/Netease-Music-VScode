@@ -2,7 +2,7 @@
   "name": "netease-music",
   "displayName": "网易云音乐",
   "description": "网易云音乐 for VS Code：EAPI 直连、PC 风侧边栏、歌单/歌手/搜索/评论、封面下载与原生音频输出。",
-  "version": "0.3.74",
+  "version": "0.3.75",
   "publisher": "AICis",
   "license": "MIT",
   "engines": {
@@ -275,6 +275,18 @@
         "title": "返回上一页",
         "category": "网易云音乐",
         "icon": "$(arrow-left)"
+      },
+      {
+        "command": "neteaseMusic.like",
+        "title": "喜欢当前歌曲",
+        "category": "网易云音乐",
+        "icon": "$(heart)"
+      },
+      {
+        "command": "neteaseMusic.minimize",
+        "title": "最小化窗口",
+        "category": "网易云音乐",
+        "icon": "$(chrome-maximize)"
       }
     ],
     "menus": {
@@ -687,7 +699,65 @@
           "markdownDescription": "状态栏显示歌名跑马灯"
         }
       }
-    }
+    },
+    "keybindings": [
+      {
+        "command": "neteaseMusic.playPause",
+        "key": "ctrl+p"
+      },
+      {
+        "command": "neteaseMusic.playPause",
+        "key": "ctrl+alt+p"
+      },
+      {
+        "command": "neteaseMusic.previous",
+        "key": "ctrl+left"
+      },
+      {
+        "command": "neteaseMusic.previous",
+        "key": "ctrl+alt+left"
+      },
+      {
+        "command": "neteaseMusic.next",
+        "key": "ctrl+right"
+      },
+      {
+        "command": "neteaseMusic.next",
+        "key": "ctrl+alt+right"
+      },
+      {
+        "command": "neteaseMusic.volumeUp",
+        "key": "ctrl+up"
+      },
+      {
+        "command": "neteaseMusic.volumeUp",
+        "key": "ctrl+alt+up"
+      },
+      {
+        "command": "neteaseMusic.volumeDown",
+        "key": "ctrl+down"
+      },
+      {
+        "command": "neteaseMusic.volumeDown",
+        "key": "ctrl+alt+down"
+      },
+      {
+        "command": "neteaseMusic.minimize",
+        "key": "ctrl+m"
+      },
+      {
+        "command": "neteaseMusic.minimize",
+        "key": "ctrl+alt+m"
+      },
+      {
+        "command": "neteaseMusic.like",
+        "key": "ctrl+l"
+      },
+      {
+        "command": "neteaseMusic.like",
+        "key": "ctrl+alt+l"
+      }
+    ]
   },
   "scripts": {
     "build": "node esbuild.mjs",

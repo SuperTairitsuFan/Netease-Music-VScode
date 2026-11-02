@@ -91,6 +91,16 @@ interface CommentsTarget {
   kind: "playlist" | "song" | "album" | "artist";
 }
 
+const SHORTCUT_DEFS = [
+  { id: "playPause", label: "播放/暂停", command: "neteaseMusic.playPause", local: "Ctrl+P", global: "Ctrl+Alt+P" },
+  { id: "previous", label: "上一首", command: "neteaseMusic.previous", local: "Ctrl+Left", global: "Ctrl+Alt+Left" },
+  { id: "next", label: "下一首", command: "neteaseMusic.next", local: "Ctrl+Right", global: "Ctrl+Alt+Right" },
+  { id: "volumeUp", label: "音量加", command: "neteaseMusic.volumeUp", local: "Ctrl+Up", global: "Ctrl+Alt+Up" },
+  { id: "volumeDown", label: "音量减", command: "neteaseMusic.volumeDown", local: "Ctrl+Down", global: "Ctrl+Alt+Down" },
+  { id: "minimize", label: "最小化窗口", command: "neteaseMusic.minimize", local: "Ctrl+M", global: "Ctrl+Alt+M" },
+  { id: "like", label: "喜欢歌曲", command: "neteaseMusic.like", local: "Ctrl+L", global: "Ctrl+Alt+L" },
+] as const;
+
 export class App implements vscode.Disposable {
   readonly session: SessionManager;
   readonly components: ComponentStore;
@@ -170,20 +180,17 @@ export class App implements vscode.Disposable {
     this.sidebar = new SidebarViewProvider(ctx, {
       ...hostDeps,
       onAudio: (msg: WebviewMessage) => void this.player.onMessage(msg),
-      onVisibility: (visible) => {
-        if (!visible && !getConfig().playback.backgroundPlay) void this.player.pause();
-      },
+      onVisibility: () => undefined,
     });
     this.mainPanel = new MainPanelProvider(ctx, {
       ...hostDeps,
       onAudio: (msg: WebviewMessage) => void this.player.onMessage(msg),
-      onVisibility: (visible) => {
-        if (!visible && !getConfig().playback.backgroundPlay) void this.player.pause();
-      },
+      onVisibility: () => undefined,
     });
     this.settingsPanel = new SettingsPanelProvider(ctx, hostDeps);
 
     this.configureStatusBar();
+    void this.applyShortcuts();
   }
 
   async activate(): Promise<void> {
@@ -434,6 +441,7 @@ export class App implements vscode.Disposable {
       showNavigation: cfg.status.showNavigation,
       showBuffer: cfg.status.showBuffer,
       showQueue: cfg.status.showQueue,
+      shortcuts: this.shortcutValues(),
       quality: cfg.quality,
       downloadQuality: cfg.download.quality === "auto" ? "auto" : QUALITY_LABELS[cfg.download.quality] ?? cfg.download.quality,
       downloadDir: this.downloads.dir,
@@ -573,6 +581,20 @@ export class App implements vscode.Disposable {
       case "createPlaylist":
         await this.createPlaylist();
         break;
+      case "choosePlaylistCover": {
+        const id = Number(payload.id ?? 0);
+        if (!id) return;
+        const picked = await vscode.window.showOpenDialog({
+          canSelectMany: false,
+          filters: { 图片: ["png", "jpg", "jpeg", "webp"] },
+          openLabel: "设为歌单封面",
+        });
+        if (!picked?.[0]) return;
+        await this.session.client.updatePlaylistCover(id, picked[0].fsPath);
+        this.toast("歌单封面已更新", "success");
+        if (this.activePlaylist?.playlist.id === id) await this.openPlaylist(id);
+        break;
+      }
       case "deletePlaylist":
         await this.deletePlaylist(Number(payload.id));
         break;
@@ -878,6 +900,9 @@ export class App implements vscode.Disposable {
           await this.refreshCurrentPage();
         }
         break;
+      case "setShortcut":
+        await this.setShortcut(String(payload.id ?? ""), String(payload.value ?? ""));
+        break;
       case "setConfig": {
         const key = String(payload.key ?? "");
         if (!key) return;
@@ -905,11 +930,17 @@ export class App implements vscode.Disposable {
           title: "选择网易云音乐目录",
         });
         if (!picked?.[0]) return;
+        const nextDir = picked[0].fsPath;
+        const previous = this.directoryForSetting(key);
+        if (previous && path.resolve(previous) !== path.resolve(nextDir)) {
+          await this.migrateDirectory(previous, nextDir);
+        }
         await vscode.workspace
           .getConfiguration("neteaseMusic")
-          .update(key, picked[0].fsPath, vscode.ConfigurationTarget.Global);
+          .update(key, nextDir, vscode.ConfigurationTarget.Global);
+        await fs.mkdir(nextDir, { recursive: true }).catch(() => undefined);
         this.pushSettings();
-        this.toast("目录已更新", "success");
+        this.toast("目录已更新并迁移数据", "success");
         break;
       }
       case "openConfigFile":
@@ -979,7 +1010,14 @@ export class App implements vscode.Disposable {
           extension: this.ctx.extensionPath,
         };
         const target = map[kind];
-        if (target) void vscode.env.openExternal(vscode.Uri.file(target));
+        if (target) {
+          await fs.mkdir(target, { recursive: true }).catch(() => undefined);
+          try {
+            await vscode.env.openExternal(vscode.Uri.file(target));
+          } catch {
+            await vscode.commands.executeCommand("revealFileInOS", vscode.Uri.file(target)).then(undefined, () => undefined);
+          }
+        }
         break;
       }
       case "selectDevice":
@@ -2249,6 +2287,13 @@ private async pickPlaybackRate(): Promise<void> {
     register("neteaseMusic.openMyProfile", () => this.openMyProfile());
     register("neteaseMusic.openSettingsPanel", () => this.openSettings("account"));
     register("neteaseMusic.playlist.open", async (id: number) => this.openPlaylist(Number(id)));
+    register("neteaseMusic.minimize", async () => {
+      try {
+        await vscode.commands.executeCommand("workbench.action.toggleWindowMaximized");
+      } catch {
+        await vscode.commands.executeCommand("workbench.action.toggleFullScreen");
+      }
+    });
     register("neteaseMusic.like", async () => {
       const id = this.player.current?.id ?? 0;
       if (id <= 0) return;
@@ -2400,6 +2445,78 @@ private async pickPlaybackRate(): Promise<void> {
   }
 
   // ------------------------------------------------------------- status bar
+
+  private directoryForSetting(key: string): string {
+    const cfg = getConfig();
+    if (key === "download.dir") return this.downloads.dir;
+    if (key === "cache.dir") return cfg.cache.dir || defaultCacheDir(this.ctx);
+    if (key === "cover.dir") return cfg.cover.dir || path.join(this.downloads.dir, "covers");
+    if (key === "localMusic.dir") return cfg.localMusic.dir || this.downloads.dir;
+    return "";
+  }
+
+  private async migrateDirectory(from: string, to: string): Promise<void> {
+    if (!from || !to || path.resolve(from) === path.resolve(to)) return;
+    const fromResolved = path.resolve(from);
+    const toResolved = path.resolve(to);
+    if (toResolved.startsWith(fromResolved + path.sep) || fromResolved.startsWith(toResolved + path.sep)) return;
+    try {
+      const stat = await fs.stat(fromResolved);
+      if (!stat.isDirectory()) return;
+      await fs.mkdir(toResolved, { recursive: true });
+      await fs.cp(fromResolved, toResolved, { recursive: true, force: false, errorOnExist: false });
+      await fs.rm(fromResolved, { recursive: true, force: true });
+    } catch {
+      this.toast("旧目录迁移失败，已保留原目录", "error");
+    }
+  }
+
+  private shortcutValues(): Record<string, string> {
+    const saved = this.ctx.globalState.get<Record<string, string>>("neteaseMusic.shortcuts") ?? {};
+    const values: Record<string, string> = {};
+    for (const def of SHORTCUT_DEFS) {
+      values[def.id] = saved[def.id] ?? def.local;
+      values[def.id + "Global"] = saved[def.id + "Global"] ?? def.global;
+    }
+    return values;
+  }
+
+  private async setShortcut(id: string, value: string): Promise<void> {
+    const saved = { ...(this.ctx.globalState.get<Record<string, string>>("neteaseMusic.shortcuts") ?? {}) };
+    saved[id] = value.trim();
+    await this.ctx.globalState.update("neteaseMusic.shortcuts", saved);
+    await this.applyShortcuts();
+    this.pushSettings();
+  }
+
+  private async applyShortcuts(): Promise<void> {
+    const values = this.shortcutValues();
+    const entries: string[] = [];
+    for (const def of SHORTCUT_DEFS) {
+      const local = values[def.id];
+      const global = values[def.id + "Global"];
+      if (local) entries.push(`  { "key": "${local.toLowerCase()}", "command": "${def.command}" }`);
+      if (global) entries.push(`  { "key": "${global.toLowerCase()}", "command": "${def.command}" }`);
+    }
+    const begin = "// >>> netease-music shortcuts (auto-generated)";
+    const end = "// <<< netease-music shortcuts";
+    const block = begin + "\n" + entries.join(",\n") + "\n  " + end;
+    try {
+      const userDir = path.dirname(path.dirname(this.ctx.globalStorageUri.fsPath));
+      const file = path.join(userDir, "keybindings.json");
+      let text = await fs.readFile(file, "utf8").catch(() => "[]");
+      text = text.replace(/\n?\/\/ >>> netease-music shortcuts[\s\S]*?\/\/ <<< netease-music shortcuts\n?/g, "");
+      const close = text.lastIndexOf("]");
+      if (close < 0) return;
+      let head = text.slice(0, close).trimEnd();
+      if (!head.endsWith("[")) head += ",";
+      text = head + "\n" + block + "\n" + text.slice(close);
+      await fs.mkdir(userDir, { recursive: true });
+      await fs.writeFile(file, text, "utf8");
+    } catch {
+      /* ignore keybindings sync errors */
+    }
+  }
 
   private configureStatusBar(): void {
     const s = this.status;

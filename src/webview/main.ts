@@ -72,6 +72,7 @@ let artistPreviewLikeOrder: LikeOrder = "none";
 let artistPreviewSortId = 0;
 let coverPreview: { url: string; name: string; artist: string } | null = null;
 let pendingLocate = false;
+let genericSort: Record<string, { key: "title" | "artist" | "album" | "duration"; dir: 1 | -1 }> = {};
 let commentsLoadingMore = false;
 
 type LikeOrder = "none" | "first" | "last";
@@ -217,21 +218,21 @@ function currentList(kind: string): Track[] {
     case "artistAll":
       return artistAllDisplayTracks();
     case "radio":
-      return page.radioPrograms ?? [];
+      return sortGenericTracks("radio", page.radioPrograms ?? []);
     case "search":
-      return page.search?.songs ?? [];
+      return sortGenericTracks("search", page.search?.songs ?? []);
     case "queue":
       return queue;
     case "recent":
-      return page.recent ?? [];
+      return sortGenericTracks("recent", page.recent ?? []);
     case "roam":
-      return page.roam ?? page.home?.roamSongs ?? [];
+      return sortGenericTracks("roam", page.roam ?? page.home?.roamSongs ?? []);
     case "cloud":
-      return page.cloud ?? [];
+      return sortGenericTracks("cloud", page.cloud ?? []);
     case "daily":
-      return page.home?.dailySongs ?? [];
+      return sortGenericTracks("daily", page.home?.dailySongs ?? []);
     case "new":
-      return page.home?.newSongs ?? [];
+      return sortGenericTracks("new", page.home?.newSongs ?? []);
     default:
       return [];
   }
@@ -322,15 +323,36 @@ function trackRow(track: Track, index: number, kind: string, options: { remove?:
   </div>`;
 }
 
+function sortGenericTracks(kind: string, tracks: Track[]): Track[] {
+  const sort = genericSort[kind];
+  if (!sort) return tracks;
+  const copy = tracks.slice();
+  copy.sort((a, b) => {
+    let result = 0;
+    if (sort.key === "title") result = a.name.localeCompare(b.name, "zh-CN");
+    else if (sort.key === "artist") result = (a.artists[0]?.name ?? "").localeCompare(b.artists[0]?.name ?? "", "zh-CN");
+    else if (sort.key === "album") result = (a.album?.name ?? "").localeCompare(b.album?.name ?? "", "zh-CN");
+    else result = (a.duration ?? 0) - (b.duration ?? 0);
+    return result * sort.dir || a.id - b.id;
+  });
+  return copy;
+}
+
 function trackTable(tracks: Track[], kind: string, emptyText = "暂无歌曲", options: { remove?: boolean } = {}): string {
   if (!tracks.length) return `<div class="empty">${esc(emptyText)}</div>`;
   const locate = player?.track && tracks.some((track) => track.id === player?.track?.id)
     ? `<button class="locate-current" data-act="locateCurrent" title="定位到当前播放歌曲">${icon("compass", 14)} 定位播放</button>`
     : "";
+  const sorted = sortGenericTracks(kind, tracks);
+  const mark = (key: "title" | "artist" | "album" | "duration", text: string): string => {
+    const item = genericSort[kind];
+    const arrow = item?.key === key ? (item.dir === 1 ? " ↑" : " ↓") : "";
+    return `<button class="head-sort" data-act="sortGeneric" data-kind="${kind}" data-key="${key}">${text}${arrow}</button>`;
+  };
   return `${locate}<div class="table-head">
-      <span>#</span><span>标题</span><span>歌手</span><span class="album-head">专辑</span><span style="text-align:right">时长</span><span></span><span></span>
+      <span><button class="sort-default" data-act="resetGenericSort" data-kind="${kind}">#</button></span><span>${mark("title", "标题")}</span><span>${mark("artist", "歌手")}</span><span class="album-head">${mark("album", "专辑")}</span><span style="text-align:right">${mark("duration", "时长")}</span><span></span><span></span>
     </div>
-    <div>${tracks.map((track, index) => trackRow(track, index, kind, options)).join("")}</div>`;
+    <div>${sorted.map((track, index) => trackRow(track, index, kind, options)).join("")}</div>`;
 }
 
 function playlistCard(item: PlaylistRef): string {
@@ -1546,6 +1568,19 @@ function onClick(event: Event): void {
       coverPreview = null;
       renderCoverPreview();
       break;
+    case "sortGeneric": {
+      const kind = el.dataset.kind ?? "";
+      const key = el.dataset.key as "title" | "artist" | "album" | "duration";
+      const existing = genericSort[kind];
+      if (existing?.key === key) existing.dir = existing.dir === 1 ? -1 : 1;
+      else genericSort[kind] = { key, dir: 1 };
+      render();
+      break;
+    }
+    case "resetGenericSort":
+      delete genericSort[el.dataset.kind ?? ""];
+      render();
+      break;
     case "sortPlaylist": {
       const key = el.dataset.key as "title" | "artist" | "album" | "duration";
       const existing = playlistSort.find((entry) => entry.key === key);
@@ -1757,6 +1792,11 @@ function onClick(event: Event): void {
       if (contextTrack) send("downloadTrack", { track: contextTrack });
       closeContextMenu();
       break;
+    case "ctx-cover":
+      const playlistId = page.playlist?.playlist.id ?? 0;
+      if (playlistId) send("choosePlaylistCover", { id: playlistId });
+      closeContextMenu();
+      break;
     case "ctx-refresh":
       send("refreshPage");
       closeContextMenu();
@@ -1842,6 +1882,7 @@ function showPlaylistMenu(id: number, x: number, y: number): void {
     <button class="ctx-item" data-act="ctx-subscribe">${icon("star", 12)} 收藏歌单</button>
     <button class="ctx-item" data-act="ctx-copy-link">${icon("external", 12)} 复制歌单链接</button>
     <div class="ctx-sep"></div>
+    <button class="ctx-item" data-act="ctx-cover">${icon("image", 12)} 更换封面</button>
     <button class="ctx-item" data-act="ctx-refresh">${icon("refresh", 12)} 刷新歌单</button>
   </div>`;
 }
