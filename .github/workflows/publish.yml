@@ -1,0 +1,49 @@
+name: Publish VS Code Marketplace
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version already present in GitHub Release"
+        required: true
+        default: "0.0.164"
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: marketplace-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download release VSIX files
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p vsix
+          gh release download "v${VERSION}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --pattern '*.vsix' \
+            --dir vsix
+          ls -lh vsix
+
+      - name: Publish all architectures
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          for target in win32-x64 win32-arm64 linux-x64 linux-arm64; do
+            file="vsix/netease-music-${VERSION}-${target}.vsix"
+            test -f "$file" || { echo "Missing $file"; exit 1; }
+            echo "Publishing $target"
+            npx --yes @vscode/vsce@4 publish \
+              --oidc \
+              --packagePath "$file" \
+              --target "$target"
+          done
