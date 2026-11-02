@@ -57,6 +57,7 @@ function boot(): void {
   <div id="modal-root"></div>`;
   document.addEventListener("click", onClick, true);
   document.addEventListener("change", onChange, true);
+document.addEventListener("keydown", captureShortcut, true);
   vscode.postMessage({ type: "ready" });
 }
 
@@ -90,6 +91,9 @@ function onClick(event: Event): void {
     }
     case "chooseDir":
       send("chooseDir", { key: el.dataset.key });
+      break;
+    case "resetShortcuts":
+      send("resetShortcuts");
       break;
     case "openConfigFile":
       send("openConfigFile");
@@ -214,6 +218,29 @@ function onClick(event: Event): void {
     default:
       break;
   }
+}
+
+function captureShortcut(event: KeyboardEvent): void {
+  const target = event.target as HTMLInputElement | null;
+  if (!target?.dataset.shortcut) return;
+  event.preventDefault();
+  event.stopPropagation();
+  if (event.key === "Backspace" || event.key === "Delete") {
+    target.value = "";
+    send("setShortcut", { id: target.dataset.shortcut + (target.dataset.scope === "global" ? "Global" : ""), value: "" });
+    return;
+  }
+  const key = event.key;
+  if (["Control", "Alt", "Shift", "Meta"].includes(key)) return;
+  const parts: string[] = [];
+  if (event.ctrlKey) parts.push("Ctrl");
+  if (event.altKey) parts.push("Alt");
+  if (event.shiftKey) parts.push("Shift");
+  if (event.metaKey) parts.push("Win");
+  const keyName: Record<string, string> = { ArrowLeft: "Left", ArrowRight: "Right", ArrowUp: "Up", ArrowDown: "Down", " ": "Space", Escape: "Escape" };
+  parts.push(keyName[key] ?? (key.length === 1 ? key.toUpperCase() : key));
+  target.value = parts.join("+");
+  send("setShortcut", { id: target.dataset.shortcut + (target.dataset.scope === "global" ? "Global" : ""), value: target.value });
 }
 
 function onChange(event: Event): void {
@@ -520,7 +547,7 @@ function renderComponents(): string {
     ${switchRow("状态栏：收藏","显示/隐藏状态栏收藏到歌单按钮","status.showFavorite",settings!.showFavorite)}
     ${switchRow("状态栏：播放模式","显示/隐藏状态栏循环模式按钮","status.showMode",settings!.showMode)}
     ${switchRow("状态栏：上一首/播放/下一首","显示/隐藏状态栏导航按钮","status.showNavigation",settings!.showNavigation)}
-    ${switchRow("状态栏：播放队列","显示/隐藏状态栏队列按钮","status.showQueue",settings!.showQueue)}<div class="shortcut-card"><div class="shortcut-title">快捷键</div><div class="shortcut-head"><span>功能说明</span><span>快捷键</span><span>全局快捷键</span></div><div class="shortcut-row"><span>播放/暂停</span><input data-shortcut="playPause" data-scope="local" value="${settings!.shortcuts?.["playPause"] ?? ""}" /><input data-shortcut="playPause" data-scope="global" value="${settings!.shortcuts?.["playPauseGlobal"] ?? ""}" /></div><div class="shortcut-row"><span>上一首</span><input data-shortcut="previous" data-scope="local" value="${settings!.shortcuts?.["previous"] ?? ""}" /><input data-shortcut="previous" data-scope="global" value="${settings!.shortcuts?.["previousGlobal"] ?? ""}" /></div><div class="shortcut-row"><span>下一首</span><input data-shortcut="next" data-scope="local" value="${settings!.shortcuts?.["next"] ?? ""}" /><input data-shortcut="next" data-scope="global" value="${settings!.shortcuts?.["nextGlobal"] ?? ""}" /></div><div class="shortcut-row"><span>音量加</span><input data-shortcut="volumeUp" data-scope="local" value="${settings!.shortcuts?.["volumeUp"] ?? ""}" /><input data-shortcut="volumeUp" data-scope="global" value="${settings!.shortcuts?.["volumeUpGlobal"] ?? ""}" /></div><div class="shortcut-row"><span>音量减</span><input data-shortcut="volumeDown" data-scope="local" value="${settings!.shortcuts?.["volumeDown"] ?? ""}" /><input data-shortcut="volumeDown" data-scope="global" value="${settings!.shortcuts?.["volumeDownGlobal"] ?? ""}" /></div><div class="shortcut-row"><span>最小化窗口</span><input data-shortcut="minimize" data-scope="local" value="${settings!.shortcuts?.["minimize"] ?? ""}" /><input data-shortcut="minimize" data-scope="global" value="${settings!.shortcuts?.["minimizeGlobal"] ?? ""}" /></div><div class="shortcut-row"><span>喜欢歌曲</span><input data-shortcut="like" data-scope="local" value="${settings!.shortcuts?.["like"] ?? ""}" /><input data-shortcut="like" data-scope="global" value="${settings!.shortcuts?.["likeGlobal"] ?? ""}" /></div></div>${uis.length ? uis.map(componentCard).join("") : `<div class="empty">安装包含 component.json 的组件目录后显示在这里</div>`}</div>
+    ${switchRow("状态栏：播放队列","显示/隐藏状态栏队列按钮","status.showQueue",settings!.showQueue)}<div class="shortcut-card"><div class="shortcut-title">快捷键</div><div class="shortcut-head"><span>功能说明</span><span>快捷键</span><span>全局快捷键</span></div><div class="shortcut-row"><span>播放/暂停</span><input readonly class="shortcut-input" data-shortcut="playPause" data-scope="local" value="${settings!.shortcuts?.["playPause"] ?? ""}" /><input readonly class="shortcut-input" data-shortcut="playPause" data-scope="global" value="${settings!.shortcuts?.["playPauseGlobal"] ?? ""}" /></div><div class="shortcut-row"><span>上一首</span><input readonly class="shortcut-input" data-shortcut="previous" data-scope="local" value="${settings!.shortcuts?.["previous"] ?? ""}" /><input readonly class="shortcut-input" data-shortcut="previous" data-scope="global" value="${settings!.shortcuts?.["previousGlobal"] ?? ""}" /></div><div class="shortcut-row"><span>下一首</span><input readonly class="shortcut-input" data-shortcut="next" data-scope="local" value="${settings!.shortcuts?.["next"] ?? ""}" /><input readonly class="shortcut-input" data-shortcut="next" data-scope="global" value="${settings!.shortcuts?.["nextGlobal"] ?? ""}" /></div><div class="shortcut-row"><span>音量加</span><input readonly class="shortcut-input" data-shortcut="volumeUp" data-scope="local" value="${settings!.shortcuts?.["volumeUp"] ?? ""}" /><input readonly class="shortcut-input" data-shortcut="volumeUp" data-scope="global" value="${settings!.shortcuts?.["volumeUpGlobal"] ?? ""}" /></div><div class="shortcut-row"><span>音量减</span><input readonly class="shortcut-input" data-shortcut="volumeDown" data-scope="local" value="${settings!.shortcuts?.["volumeDown"] ?? ""}" /><input readonly class="shortcut-input" data-shortcut="volumeDown" data-scope="global" value="${settings!.shortcuts?.["volumeDownGlobal"] ?? ""}" /></div><div class="shortcut-row"><span>最小化窗口</span><input readonly class="shortcut-input" data-shortcut="minimize" data-scope="local" value="${settings!.shortcuts?.["minimize"] ?? ""}" /><input readonly class="shortcut-input" data-shortcut="minimize" data-scope="global" value="${settings!.shortcuts?.["minimizeGlobal"] ?? ""}" /></div><div class="shortcut-row"><span>喜欢歌曲</span><input readonly class="shortcut-input" data-shortcut="like" data-scope="local" value="${settings!.shortcuts?.["like"] ?? ""}" /><input readonly class="shortcut-input" data-shortcut="like" data-scope="global" value="${settings!.shortcuts?.["likeGlobal"] ?? ""}" /></div><div class="shortcut-actions"><button class="btn small" data-act="resetShortcuts">恢复默认快捷键</button></div></div>${uis.length ? uis.map(componentCard).join("") : `<div class="empty">安装包含 component.json 的组件目录后显示在这里</div>`}</div>
   </div>`;
 }
 

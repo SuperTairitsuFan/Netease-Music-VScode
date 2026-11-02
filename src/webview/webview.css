@@ -3388,3 +3388,10 @@ svg {
 .shortcut-head, .shortcut-row { display: grid; grid-template-columns: 1fr 180px 180px; gap: 10px; align-items: center; padding: 5px 0; font-size: 12px; }
 .shortcut-head { color: var(--muted); border-bottom: 1px solid var(--border); }
 .shortcut-row input { width: 100%; box-sizing: border-box; padding: 4px 7px; border: 1px solid var(--border); border-radius: 5px; background: var(--bg); color: var(--fg); font-size: 12px; }
+
+/* compact vertical volume popover: never stretch from left+right together */
+.volume-pop { left: auto; right: 12px; width: auto; max-width: 64px; }
+
+.shortcut-actions { margin-top: 8px; }
+.shortcut-input { cursor: pointer; }
+.shortcut-input:focus { outline: 2px solid var(--red); outline-offset: 1px; }

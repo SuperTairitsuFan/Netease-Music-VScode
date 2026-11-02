@@ -2,7 +2,7 @@
   "name": "netease-music",
   "displayName": "网易云音乐",
   "description": "网易云音乐 for VS Code：EAPI 直连、PC 风侧边栏、歌单/歌手/搜索/评论、封面下载与原生音频输出。",
-  "version": "0.3.75",
+  "version": "0.3.76",
   "publisher": "AICis",
   "license": "MIT",
   "engines": {
@@ -703,59 +703,59 @@
     "keybindings": [
       {
         "command": "neteaseMusic.playPause",
-        "key": "ctrl+p"
+        "key": "alt+shift+p"
       },
       {
         "command": "neteaseMusic.playPause",
-        "key": "ctrl+alt+p"
+        "key": "ctrl+alt+shift+p"
       },
       {
         "command": "neteaseMusic.previous",
-        "key": "ctrl+left"
+        "key": "alt+shift+left"
       },
       {
         "command": "neteaseMusic.previous",
-        "key": "ctrl+alt+left"
+        "key": "ctrl+alt+shift+left"
       },
       {
         "command": "neteaseMusic.next",
-        "key": "ctrl+right"
+        "key": "alt+shift+right"
       },
       {
         "command": "neteaseMusic.next",
-        "key": "ctrl+alt+right"
+        "key": "ctrl+alt+shift+right"
       },
       {
         "command": "neteaseMusic.volumeUp",
-        "key": "ctrl+up"
+        "key": "alt+shift+up"
       },
       {
         "command": "neteaseMusic.volumeUp",
-        "key": "ctrl+alt+up"
+        "key": "ctrl+alt+shift+up"
       },
       {
         "command": "neteaseMusic.volumeDown",
-        "key": "ctrl+down"
+        "key": "alt+shift+down"
       },
       {
         "command": "neteaseMusic.volumeDown",
-        "key": "ctrl+alt+down"
+        "key": "ctrl+alt+shift+down"
       },
       {
         "command": "neteaseMusic.minimize",
-        "key": "ctrl+m"
+        "key": "alt+shift+m"
       },
       {
         "command": "neteaseMusic.minimize",
-        "key": "ctrl+alt+m"
+        "key": "ctrl+alt+shift+m"
       },
       {
         "command": "neteaseMusic.like",
-        "key": "ctrl+l"
+        "key": "alt+shift+l"
       },
       {
         "command": "neteaseMusic.like",
-        "key": "ctrl+alt+l"
+        "key": "ctrl+alt+shift+l"
       }
     ]
   },

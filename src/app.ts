@@ -92,13 +92,13 @@ interface CommentsTarget {
 }
 
 const SHORTCUT_DEFS = [
-  { id: "playPause", label: "播放/暂停", command: "neteaseMusic.playPause", local: "Ctrl+P", global: "Ctrl+Alt+P" },
-  { id: "previous", label: "上一首", command: "neteaseMusic.previous", local: "Ctrl+Left", global: "Ctrl+Alt+Left" },
-  { id: "next", label: "下一首", command: "neteaseMusic.next", local: "Ctrl+Right", global: "Ctrl+Alt+Right" },
-  { id: "volumeUp", label: "音量加", command: "neteaseMusic.volumeUp", local: "Ctrl+Up", global: "Ctrl+Alt+Up" },
-  { id: "volumeDown", label: "音量减", command: "neteaseMusic.volumeDown", local: "Ctrl+Down", global: "Ctrl+Alt+Down" },
-  { id: "minimize", label: "最小化窗口", command: "neteaseMusic.minimize", local: "Ctrl+M", global: "Ctrl+Alt+M" },
-  { id: "like", label: "喜欢歌曲", command: "neteaseMusic.like", local: "Ctrl+L", global: "Ctrl+Alt+L" },
+  { id: "playPause", label: "播放/暂停", command: "neteaseMusic.playPause", local: "Alt+Shift+P", global: "Ctrl+Alt+Shift+P" },
+  { id: "previous", label: "上一首", command: "neteaseMusic.previous", local: "Alt+Shift+Left", global: "Ctrl+Alt+Shift+Left" },
+  { id: "next", label: "下一首", command: "neteaseMusic.next", local: "Alt+Shift+Right", global: "Ctrl+Alt+Shift+Right" },
+  { id: "volumeUp", label: "音量加", command: "neteaseMusic.volumeUp", local: "Alt+Shift+Up", global: "Ctrl+Alt+Shift+Up" },
+  { id: "volumeDown", label: "音量减", command: "neteaseMusic.volumeDown", local: "Alt+Shift+Down", global: "Ctrl+Alt+Shift+Down" },
+  { id: "minimize", label: "最小化窗口", command: "neteaseMusic.minimize", local: "Alt+Shift+M", global: "Ctrl+Alt+Shift+M" },
+  { id: "like", label: "喜欢歌曲", command: "neteaseMusic.like", local: "Alt+Shift+L", global: "Ctrl+Alt+Shift+L" },
 ] as const;
 
 export class App implements vscode.Disposable {
@@ -900,6 +900,11 @@ export class App implements vscode.Disposable {
           await this.refreshCurrentPage();
         }
         break;
+      case "resetShortcuts":
+        await this.ctx.globalState.update("neteaseMusic.shortcuts", undefined);
+        await this.applyShortcuts();
+        this.pushSettings();
+        break;
       case "setShortcut":
         await this.setShortcut(String(payload.id ?? ""), String(payload.value ?? ""));
         break;
@@ -1012,10 +1017,12 @@ export class App implements vscode.Disposable {
         const target = map[kind];
         if (target) {
           await fs.mkdir(target, { recursive: true }).catch(() => undefined);
+          const command = process.platform === "win32" ? "explorer.exe" : process.platform === "darwin" ? "open" : "xdg-open";
           try {
-            await vscode.env.openExternal(vscode.Uri.file(target));
+            const child = spawn(command, [target], { detached: true, stdio: "ignore" });
+            child.unref();
           } catch {
-            await vscode.commands.executeCommand("revealFileInOS", vscode.Uri.file(target)).then(undefined, () => undefined);
+            await vscode.env.openExternal(vscode.Uri.file(target)).then(undefined, () => undefined);
           }
         }
         break;
