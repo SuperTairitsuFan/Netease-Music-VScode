@@ -258,10 +258,14 @@ int naoe_play_file(const char *path, const char *backend_name, int start_ms, int
     played += got;
     uint64_t now = naoe_now_ms();
     if (now - last_report >= 120) {
+      uint64_t device_played = played;
+      if (backend->position && backend->position(handle, &device_played) == 0) {
+        /* use frames actually consumed by the device, not decoded-ahead frames */
+      }
       char progress[192];
       snprintf(progress, sizeof(progress),
                "{\"event\":\"progress\",\"frames\":%llu,\"playedFrames\":%llu}",
-               (unsigned long long)played, (unsigned long long)played);
+               (unsigned long long)played, (unsigned long long)device_played);
       emit_line(progress);
       last_report = now;
     }

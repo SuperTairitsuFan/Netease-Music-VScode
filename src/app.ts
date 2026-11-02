@@ -97,7 +97,6 @@ const SHORTCUT_DEFS = [
   { id: "next", label: "下一首", command: "neteaseMusic.next", local: "Alt+Shift+Right", global: "Ctrl+Alt+Shift+Right" },
   { id: "volumeUp", label: "音量加", command: "neteaseMusic.volumeUp", local: "Alt+Shift+Up", global: "Ctrl+Alt+Shift+Up" },
   { id: "volumeDown", label: "音量减", command: "neteaseMusic.volumeDown", local: "Alt+Shift+Down", global: "Ctrl+Alt+Shift+Down" },
-  { id: "minimize", label: "最小化窗口", command: "neteaseMusic.minimize", local: "Alt+Shift+M", global: "Ctrl+Alt+Shift+M" },
   { id: "like", label: "喜欢歌曲", command: "neteaseMusic.like", local: "Alt+Shift+L", global: "Ctrl+Alt+Shift+L" },
 ] as const;
 
@@ -2506,7 +2505,6 @@ private async pickPlaybackRate(): Promise<void> {
   }
 
   private async setShortcut(id: string, value: string): Promise<void> {
-    if (!id.startsWith("playPause")) return;
     const saved = { ...(this.ctx.globalState.get<Record<string, string>>("neteaseMusic.shortcuts") ?? {}) };
     saved[id] = value.trim();
     await this.ctx.globalState.update("neteaseMusic.shortcuts", saved);
@@ -2518,10 +2516,9 @@ private async pickPlaybackRate(): Promise<void> {
     const values = this.shortcutValues();
     const entries: string[] = [];
     for (const def of SHORTCUT_DEFS) {
-      if (def.id !== "playPause") continue;
       const local = values[def.id];
       const global = values[def.id + "Global"];
-      if (local) entries.push(`  { "key": "${local.toLowerCase()}", "command": "${def.command}", "when": "activeWebviewPanelId == 'neteaseMusic.main'" }`);
+      if (local) entries.push(`  { "key": "${local.toLowerCase()}", "command": "${def.command}", "when": "activeWebviewPanelId == 'neteaseMusic.main' || focusedView == 'neteaseMusic.sidebar'" }`);
       if (global) entries.push(`  { "key": "${global.toLowerCase()}", "command": "${def.command}" }`);
     }
     const begin = "// >>> netease-music shortcuts (auto-generated)";

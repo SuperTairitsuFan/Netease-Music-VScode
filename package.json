@@ -2,7 +2,7 @@
   "name": "netease-music",
   "displayName": "网易云音乐",
   "description": "网易云音乐 for VS Code：EAPI 直连、PC 风侧边栏、歌单/歌手/搜索/评论、封面下载与原生音频输出。",
-  "version": "0.3.79",
+  "version": "0.3.83",
   "publisher": "AICis",
   "license": "MIT",
   "engines": {
@@ -704,11 +704,56 @@
       {
         "command": "neteaseMusic.playPause",
         "key": "alt+shift+p",
-        "when": "activeWebviewPanelId == 'neteaseMusic.main'"
+        "when": "activeWebviewPanelId == 'neteaseMusic.main' || focusedView == 'neteaseMusic.sidebar'"
       },
       {
         "command": "neteaseMusic.playPause",
         "key": "ctrl+alt+shift+p"
+      },
+      {
+        "command": "neteaseMusic.previous",
+        "key": "alt+shift+left",
+        "when": "activeWebviewPanelId == 'neteaseMusic.main' || focusedView == 'neteaseMusic.sidebar'"
+      },
+      {
+        "command": "neteaseMusic.previous",
+        "key": "ctrl+alt+shift+left"
+      },
+      {
+        "command": "neteaseMusic.next",
+        "key": "alt+shift+right",
+        "when": "activeWebviewPanelId == 'neteaseMusic.main' || focusedView == 'neteaseMusic.sidebar'"
+      },
+      {
+        "command": "neteaseMusic.next",
+        "key": "ctrl+alt+shift+right"
+      },
+      {
+        "command": "neteaseMusic.volumeUp",
+        "key": "alt+shift+up",
+        "when": "activeWebviewPanelId == 'neteaseMusic.main' || focusedView == 'neteaseMusic.sidebar'"
+      },
+      {
+        "command": "neteaseMusic.volumeUp",
+        "key": "ctrl+alt+shift+up"
+      },
+      {
+        "command": "neteaseMusic.volumeDown",
+        "key": "alt+shift+down",
+        "when": "activeWebviewPanelId == 'neteaseMusic.main' || focusedView == 'neteaseMusic.sidebar'"
+      },
+      {
+        "command": "neteaseMusic.volumeDown",
+        "key": "ctrl+alt+shift+down"
+      },
+      {
+        "command": "neteaseMusic.like",
+        "key": "alt+shift+l",
+        "when": "activeWebviewPanelId == 'neteaseMusic.main' || focusedView == 'neteaseMusic.sidebar'"
+      },
+      {
+        "command": "neteaseMusic.like",
+        "key": "ctrl+alt+shift+l"
       }
     ]
   },
