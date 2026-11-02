@@ -862,6 +862,9 @@ export class App implements vscode.Disposable {
       case "login":
         await this.openLogin();
         break;
+      case "qrStop":
+        this.stopQr();
+        break;
       case "qrStart":
         await this.startQrLogin();
         break;

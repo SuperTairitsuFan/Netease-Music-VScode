@@ -445,6 +445,7 @@ export type WebviewCommand =
   | "setShortcut"
   | "choosePlaylistCover"
   | "resetShortcuts"
+  | "qrStop"
   | "qualityPicker"
   | "sleepTimer"
   | "playbackRate"

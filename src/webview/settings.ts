@@ -124,6 +124,8 @@ function onClick(event: Event): void {
       if (loginMode === "qr" && !qr) {
         qrBusy = true;
         send("qrStart");
+      } else if (loginMode !== "qr") {
+        send("qrStop");
       }
       renderModal();
       break;
@@ -570,6 +572,7 @@ function closeModal(): void {
   modal = null;
   qrBusy = false;
   qr = null;
+  send("qrStop");
   if (captchaTimer) {
     clearInterval(captchaTimer);
     captchaTimer = undefined;
@@ -656,7 +659,7 @@ window.addEventListener("message", (event: MessageEvent<HostMessage>) => {
     case "qr":
       qr = { dataUrl: msg.dataUrl, code: msg.code, message: msg.message };
       qrBusy = false;
-      if (modal) renderModal();
+      if (modal && loginMode === "qr") renderModal();
       break;
     case "loginResult":
       toast(msg.message, msg.ok ? "success" : "error");
