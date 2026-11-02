@@ -938,7 +938,7 @@ export class App implements vscode.Disposable {
         const nextDir = picked[0].fsPath;
         const previous = this.directoryForSetting(key);
         if (previous && path.resolve(previous) !== path.resolve(nextDir)) {
-          await this.migrateDirectory(previous, nextDir);
+          await this.migrateDirectory(previous, nextDir, key);
         }
         await vscode.workspace
           .getConfiguration("neteaseMusic")
@@ -2462,17 +2462,34 @@ private async pickPlaybackRate(): Promise<void> {
     return "";
   }
 
-  private async migrateDirectory(from: string, to: string): Promise<void> {
+  private async migrateDirectory(from: string, to: string, key: string): Promise<void> {
     if (!from || !to || path.resolve(from) === path.resolve(to)) return;
     const fromResolved = path.resolve(from);
     const toResolved = path.resolve(to);
     if (toResolved.startsWith(fromResolved + path.sep) || fromResolved.startsWith(toResolved + path.sep)) return;
+    const cacheFile = /\.(flac|mp3|m4a|wav|ogg|ape|part|done)$/i;
+    const coverFile = /\.(png|jpe?g|webp|gif)$/i;
+    const downloadFile = /\.(flac|mp3|m4a|wav|ogg|ape|lrc|png|jpe?g|webp|gif)$/i;
+    const allowed = key === "cache.dir"
+      ? (name: string) => /\.(flac|mp3|m4a|wav|ogg|ape|part|done)$/i.test(name)
+      : key === "cover.dir"
+        ? (name: string) => coverFile.test(name)
+        : key === "download.dir"
+          ? (name: string) => downloadFile.test(name)
+          : (name: string) => cacheFile.test(name);
     try {
       const stat = await fs.stat(fromResolved);
       if (!stat.isDirectory()) return;
       await fs.mkdir(toResolved, { recursive: true });
-      await fs.cp(fromResolved, toResolved, { recursive: true, force: false, errorOnExist: false });
-      await fs.rm(fromResolved, { recursive: true, force: true });
+      const entries = await fs.readdir(fromResolved, { withFileTypes: true });
+      for (const entry of entries) {
+        if (!entry.isFile() || !allowed(entry.name)) continue;
+        const source = path.join(fromResolved, entry.name);
+        const target = path.join(toResolved, entry.name);
+        await fs.copyFile(source, target);
+        await fs.rm(source, { force: true });
+      }
+      await fs.rmdir(fromResolved).catch(() => undefined);
     } catch {
       this.toast("旧目录迁移失败，已保留原目录", "error");
     }

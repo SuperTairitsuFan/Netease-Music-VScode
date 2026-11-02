@@ -100,7 +100,7 @@ function boot(): void {
       <button class="icon-btn quality-btn" data-act="quality" title="音质调节">${icon("music", 14)}<span id="side-quality">极高</span></button>
       <button class="icon-btn" data-act="sleepTimer" title="定时关闭">${icon("clock", 14)}</button>
       <button class="icon-btn rate-btn" data-act="playbackRate" title="播放速度">1.0x</button>
-      <button class="icon-btn" data-act="volumePopup" title="音量（双击静音）">${icon("volume", 14)}</button>
+      
       <div class="sleep-pop quality-pop" id="quality-pop" hidden>
         <div class="sleep-title">音质调节<button class="icon-btn quality-close" data-act="closeQuality" title="关闭">×</button></div>
         <button class="quality-option" data-act="setQuality" data-quality="standard"><span>标准</span><span class="quality-desc">128 kbps</span></button>
