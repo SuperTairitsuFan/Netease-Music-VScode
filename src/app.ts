@@ -2502,7 +2502,7 @@ private async pickPlaybackRate(): Promise<void> {
     for (const def of SHORTCUT_DEFS) {
       const local = values[def.id];
       const global = values[def.id + "Global"];
-      if (local) entries.push(`  { "key": "${local.toLowerCase()}", "command": "${def.command}" }`);
+      if (local) entries.push(`  { "key": "${local.toLowerCase()}", "command": "${def.command}", "when": "activeWebviewPanelId == 'neteaseMusic.main'" }`);
       if (global) entries.push(`  { "key": "${global.toLowerCase()}", "command": "${def.command}" }`);
     }
     const begin = "// >>> netease-music shortcuts (auto-generated)";
