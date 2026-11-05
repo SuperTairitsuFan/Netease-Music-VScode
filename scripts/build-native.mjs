@@ -44,7 +44,7 @@ const TARGETS = {
     arch: "arm64",
     backend: "wasapi",
     entry: "native-audio-output.exe",
-    libs: ["-lole32", "-luuid", "-loleaut32", "-lavrt", "-ladvapi32"],
+    libs: ["-lole32", "-luuid", "-loleaut32", "-lavrt", "-ladvapi32", "-lgdi32"],
     cflags: ["-I", path.join(root, "native/src"), "-I", path.join(root, "native/third_party/asio"), "-I", path.join(root, "native/third_party/dr_libs")],
   },
   "win32-x64": {
@@ -53,7 +53,7 @@ const TARGETS = {
     arch: "x64",
     backend: "wasapi",
     entry: "native-audio-output.exe",
-    libs: ["-lole32", "-luuid", "-loleaut32", "-lavrt", "-ladvapi32"],
+    libs: ["-lole32", "-luuid", "-loleaut32", "-lavrt", "-ladvapi32", "-lgdi32"],
     cflags: ["-I", path.join(root, "native/src"), "-I", path.join(root, "native/third_party/asio"), "-I", path.join(root, "native/third_party/dr_libs")],
   },
 };

@@ -34,6 +34,7 @@ export interface Track {
   mvid?: number;
   privilege?: SongPrivilege;
   commentCount?: number;
+  likedCount?: number;
   /** local-only tracks */
   localPath?: string;
   liked?: boolean;
@@ -182,6 +183,7 @@ export interface Comment {
   time: number;
   likedCount: number;
   liked: boolean;
+  replyCount?: number;
   replied?: { user: CommentUser; content: string };
 }
 
@@ -249,4 +251,43 @@ export interface HomeFeed {
   radios: DjRadio[];
   roamSongs: Track[];
   followedArtists: ArtistRef[];
+}
+
+export interface ListenTogetherPlayCommand {
+  targetSongId?: number;
+  formerSongId?: number;
+  progress?: number;
+  playStatus?: string | number;
+  clientSeq?: number;
+}
+
+export interface ListenTogetherVersion {
+  userId: number;
+  version: number;
+}
+
+export interface ListenTogetherRoomState {
+  playCommand?: ListenTogetherPlayCommand;
+  playlist?: {
+    displayList?: { result?: Array<number | { songId?: number }> };
+    playMode?: string;
+    version?: ListenTogetherVersion[];
+  };
+}
+
+export interface FriendUser {
+  userId: number;
+  nickname: string;
+  avatarUrl: string;
+  signature?: string;
+}
+
+export interface PrivateMessage {
+  id: string;
+  fromUserId: number;
+  content: string;
+  time: number;
+  roomId?: string;
+  inviterId?: string;
+  inviteUrl?: string;
 }

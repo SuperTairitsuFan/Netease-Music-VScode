@@ -1,0 +1,8 @@
+{
+  "tag_name": "v1.0.1",
+  "name": "v1.0.1 · 自动切歌与结尾稳定性修复",
+  "body": "## 网易云音乐 for VS Code（非官方）1.0.1\n\n> 个人项目，非官方。如官方提出异议，会立即下架相关文档、仓库、Release 和插件。\n\n### 修复\n\n- 修复原生播放到结尾偶发不触发 drained、导致不自动切歌的问题。\n- 增加原生结尾看门狗：接近结尾且长时间没有播放进度时，主动结束当前曲目并进入下一首。\n- 其他功能与 1.0.0 相同。\n\n扩展 ID：`AICis.netease-music-vscode`\n",
+  "draft": false,
+  "prerelease": false,
+  "make_latest": "true"
+}

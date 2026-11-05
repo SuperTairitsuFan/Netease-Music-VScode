@@ -1,0 +1,8 @@
+{
+  "tag_name": "v1.0.197",
+  "name": "v1.0.197",
+  "body": "## 网易云音乐 VS Code 扩展 v1.0.197\n\n相对上次发布 v1.0.185 的变化：\n\n### 新增\n\n- 评论改为独立悬浮窗：支持评论点赞、回复、展开楼层回复、刷新和关闭。\n- 新增“沉浸歌词”页面：隐藏侧边栏、封面高斯模糊背景、全页歌词、跟随换歌。\n- 沉浸页底部使用一条可点击/拖动的细进度线，不再显示完整播放条。\n- 歌曲详细页新增明确的“专辑”行，可直接打开专辑。\n- 详细页操作按钮改为两列对齐网格，补齐边框并统一高度。\n\n### 调整\n\n- 新用户默认输出改为 WebAudio，原生后端默认 WASAPI。\n- ASIO 仅在检测到厂商驱动后可选。\n- 独占模式、Bit-perfect、长驻 seek 默认关闭。\n- WASAPI / ASIO 文案改为中性描述。\n\n### 修复\n\n- 评论加载失败不再无限转圈，增加超时、错误提示和重新加载。\n- 修复评论回复按钮渲染时 `state.total` 为空导致的页面崩溃。\n- 修复进度条空白带、歌词自动滚动失效和评论输入框滚走的问题。\n\n### 下载\n\n- Windows x64：`netease-music-1.0.197-win32-x64.vsix`\n- Windows ARM64：`netease-music-1.0.197-win32-arm64.vsix`\n- Linux x64：`netease-music-1.0.197-linux-x64.vsix`\n- Linux ARM64：`netease-music-1.0.197-linux-arm64.vsix`\n",
+  "draft": false,
+  "prerelease": false,
+  "make_latest": "true"
+}

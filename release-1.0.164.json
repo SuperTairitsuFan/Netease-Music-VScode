@@ -1,0 +1,8 @@
+{
+  "tag_name": "v1.0.164",
+  "name": "v1.0.164",
+  "body": "## 网易云音乐 VS Code 扩展 v1.0.164\n\n版本提升到 1.0.164，高于 Marketplace 已存在的 0.3.88，作为最新版发布。\n\n### 下载\n\n- Windows x64：`netease-music-1.0.164-win32-x64.vsix`\n- Windows ARM64：`netease-music-1.0.164-win32-arm64.vsix`\n- Linux x64：`netease-music-1.0.164-linux-x64.vsix`\n- Linux ARM64：`netease-music-1.0.164-linux-arm64.vsix`\n",
+  "draft": false,
+  "prerelease": false,
+  "make_latest": "true"
+}

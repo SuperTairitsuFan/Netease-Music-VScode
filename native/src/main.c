@@ -147,7 +147,7 @@ static void out_init(void) {
   }
 }
 
-int naoe_play_file(const char *path, const char *backend_name, int start_ms, int growing, const char *done_path, int exclusive, int bits, const char *device);
+int naoe_play_file(const char *path, const char *backend_name, int start_ms, int growing, const char *done_path, int exclusive, int bits, const char *device, int hrtf);
 
 static void send_line(const char *line) {
   out_init();
@@ -630,8 +630,15 @@ static void set_binary_stdio(void) {
 #endif
 }
 
+int naoe_smtc_main(void);
+int naoe_lyrics_main(void);
+int naoe_fonts_main(void);
+
 int main(int argc, char **argv) {
   set_binary_stdio();
+  if (argc > 1 && strcmp(argv[1], "--smtc") == 0) return naoe_smtc_main();
+  if (argc > 1 && strcmp(argv[1], "--lyrics") == 0) return naoe_lyrics_main();
+  if (argc > 1 && strcmp(argv[1], "--fonts") == 0) return naoe_fonts_main();
   const char *backend_name = getenv("NAOE_BACKEND");
   int mode_probe = 0;
   int mode_serve = 0;
@@ -641,6 +648,7 @@ int main(int argc, char **argv) {
   int start_ms = 0;
   int play_exclusive = 1;
   int play_bits = 32;
+  int play_hrtf = 0;
   const char *play_device = "default";
   for (int i = 1; i < argc; i++) {
     if (strcmp(argv[i], "--probe") == 0) mode_probe = 1;
@@ -657,9 +665,10 @@ int main(int argc, char **argv) {
     else if (strcmp(argv[i], "--exclusive") == 0 && i + 1 < argc) play_exclusive = atoi(argv[++i]);
     else if (strcmp(argv[i], "--bits") == 0 && i + 1 < argc) play_bits = atoi(argv[++i]);
     else if (strcmp(argv[i], "--device") == 0 && i + 1 < argc) play_device = argv[++i];
+    else if (strcmp(argv[i], "--hrtf") == 0 && i + 1 < argc) play_hrtf = atoi(argv[++i]);
   }
 
-  if (play_file) return naoe_play_file(play_file, backend_name, start_ms, growing, done_path, play_exclusive, play_bits, play_device);
+  if (play_file) return naoe_play_file(play_file, backend_name, start_ms, growing, done_path, play_exclusive, play_bits, play_device, play_hrtf);
 
   const NaoeBackend *backend = NULL;
   if (naoe_backend_select(backend_name, &backend) != 0) {

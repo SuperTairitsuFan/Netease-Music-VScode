@@ -30,6 +30,7 @@ import { SessionManager } from "./auth/session";
 import { commentResource } from "./api/client";
 import type {
   Account,
+  Comment,
   AlbumDetail,
   ArtistDetail,
   ArtistRef,
@@ -53,11 +54,14 @@ import { DownloadManager } from "./download/downloader";
 import { ComponentStore, type ComponentRecord } from "./player/components";
 import { probeEngine, type EngineProbe } from "./player/nativeEngine";
 import { PlayerService } from "./player/player";
+import { SmtcService } from "./player/smtc";
+import { LyricsOverlayService } from "./player/lyricsOverlay";
 import type {
   CommentsView,
   ComponentView,
   HostMessage,
   InitState,
+  ListenTogetherView,
   LocalTrackView,
   NativeStatusView,
   PageView,
@@ -97,6 +101,7 @@ const SHORTCUT_DEFS = [
   { id: "next", label: "下一首", command: "neteaseMusic.next", local: "Alt+Shift+Right", global: "Ctrl+Alt+Shift+Right" },
   { id: "volumeUp", label: "音量加", command: "neteaseMusic.volumeUp", local: "Alt+Shift+Up", global: "Ctrl+Alt+Shift+Up" },
   { id: "volumeDown", label: "音量减", command: "neteaseMusic.volumeDown", local: "Alt+Shift+Down", global: "Ctrl+Alt+Shift+Down" },
+  { id: "lyrics", label: "歌词悬浮窗", command: "neteaseMusic.toggleLyrics", local: "Alt+Shift+K", global: "Ctrl+Alt+Shift+K" },
   { id: "like", label: "喜欢歌曲", command: "neteaseMusic.like", local: "Alt+Shift+L", global: "Ctrl+Alt+Shift+L" },
 ] as const;
 
@@ -110,6 +115,7 @@ export class App implements vscode.Disposable {
   readonly settingsPanel: SettingsPanelProvider;
 
   private readonly status = {
+    lyrics: vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 119.5),
     buffer: vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 119),
     like: vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 118),
     favorite: vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 117),
@@ -130,13 +136,34 @@ export class App implements vscode.Disposable {
   private readonly statusItems: vscode.StatusBarItem[];
 
   private userPlaylists: UserPlaylist[] = [];
+  private smtc?: SmtcService;
+  private lyricsOverlay?: LyricsOverlayService;
+  private systemFonts: string[] = ["Microsoft YaHei UI", "Microsoft YaHei", "SimHei", "SimSun"];
+  private fontsLoaded = false;
   private playlistsLoaded = false;
   private activeNav = "recommend";
+  private listen: ListenTogetherView = { status: "idle" };
+  private listenPoll?: NodeJS.Timeout;
+  private listenRoomId = "";
+  private listenTrack?: Track;
+  private listenBase?: { trackId: number; progress: number; at: number; playing: boolean };
+  private listenCommand?: { targetSongId: number; formerSongId: number; clientSeq: number };
+  private listenList: number[] = [];
+  private listenQueue: Track[] = [];
+  private listenListKey = "";
+  private listenVersions: Array<{ userId: number; version: number }> = [];
+  private listenPlayMode = "ORDER_LOOP";
+  private listenForceSeek = false;
+  private listenLastProgress?: number;
   private currentPage: PageView = { kind: "recommend", title: "推荐", loading: true };
   private pageHistory: PageView[] = [];
+  private followingSong = false;
+  private immersiveSidebarHidden = false;
   private navigatingBack = false;
   private settingsTab = "account";
+  private lastOutputKind = "";
   private activePlaylist?: PlaylistDetail;
+  private readonly playlistCache = new Map<number, PlaylistDetail>();
   private commentsTarget?: CommentsTarget;
   private commentsView?: CommentsView;
   private subscribersView?: SubscribersView;
@@ -149,13 +176,19 @@ export class App implements vscode.Disposable {
   private localCount = 0;
   private cloudTracks: Track[] = [];
   private qrTimer?: NodeJS.Timeout;
+  private friendPoll?: NodeJS.Timeout;
   private probeCache?: ProbeCache;
+  private autoConfiguring = false;
+  private outputAutoInitialized = false;
+  private probing = false;
+  private outputProbeAt = 0;
   private lastVolume = 0.8;
   private pendingLogin = false;
   private pendingQueuePopup = false;
   private marqueeOffset = 0;
   private marqueeTimer?: NodeJS.Timeout;
   private lastTitle = "";
+  private lastStatusKey = "";
   private sleepTimer?: NodeJS.Timeout;
   private sleepTicker?: NodeJS.Timeout;
   private sleepUntil?: number;
@@ -190,6 +223,105 @@ export class App implements vscode.Disposable {
 
     this.configureStatusBar();
     void this.applyShortcuts();
+    void this.startSmtc();
+  }
+
+  private async loadSystemFonts(): Promise<void> {
+    if (this.fontsLoaded || process.platform !== "win32") return;
+    this.fontsLoaded = true;
+    const record = await this.components.nativeRecord().catch(() => undefined);
+    if (!record?.entryPath) return;
+    try {
+      const child = spawn(record.entryPath, ["--fonts"], { stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
+      let output = "";
+      child.stdout.on("data", (data: Buffer) => { output += data.toString("utf8"); });
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(() => { child.kill(); resolve(); }, 3000);
+        child.on("exit", () => { clearTimeout(timer); resolve(); });
+        child.on("error", () => { clearTimeout(timer); resolve(); });
+      });
+      const found = output.split(/\r?\n/).map((line) => line.startsWith("FONT\t") ? line.slice(5).trim() : "").filter((name) => Boolean(name) && !name.startsWith("@"));
+      if (found.length) {
+        this.systemFonts = [...new Set(found)].sort((a, b) => a.localeCompare(b, "zh-CN"));
+        this.pushSettings();
+      }
+    } catch {
+      /* keep fallback fonts */
+    }
+  }
+
+  private async startLyricsOverlay(): Promise<void> {
+    if (process.platform !== "win32") return;
+    if (!getConfig().lyricsOverlay.enabled) {
+      this.lyricsOverlay?.stop();
+      this.lyricsOverlay = undefined;
+      return;
+    }
+    if (this.lyricsOverlay) return;
+    const record = await this.components.nativeRecord().catch(() => undefined);
+    if (!record?.entryPath || record.status !== "ready") return;
+    const service = new LyricsOverlayService();
+    service.onPosition = (x, y) => {
+      void vscode.workspace.getConfiguration("neteaseMusic").update("lyricsOverlay.x", x, vscode.ConfigurationTarget.Global);
+      void vscode.workspace.getConfiguration("neteaseMusic").update("lyricsOverlay.y", y, vscode.ConfigurationTarget.Global);
+    };
+    service.onCommand = (command) => {
+      if (command === "previous") void this.player.previous();
+      else if (command === "next") void this.player.next(true);
+      else if (command === "playPause") {
+        if (this.player.state().playing) void this.player.pause();
+        else void this.player.toggle();
+      } else if (command === "queue") this.openQueue();
+      else if (command === "close") {
+        void vscode.workspace.getConfiguration("neteaseMusic").update("lyricsOverlay.enabled", false, vscode.ConfigurationTarget.Global);
+        this.lyricsOverlay?.stop();
+        this.lyricsOverlay = undefined;
+        this.updateStatus();
+      }
+    };
+    service.onStyle = (size, dual) => {
+      void vscode.workspace.getConfiguration("neteaseMusic").update("lyricsOverlay.size", size, vscode.ConfigurationTarget.Global);
+      void vscode.workspace.getConfiguration("neteaseMusic").update("lyricsOverlay.dual", dual, vscode.ConfigurationTarget.Global);
+    };
+    service.onLock = (locked) => {
+      void vscode.workspace.getConfiguration("neteaseMusic").update("lyricsOverlay.locked", locked, vscode.ConfigurationTarget.Global);
+    };
+    this.lyricsOverlay = service;
+    service.start(record.entryPath, getConfig().lyricsOverlay);
+    service.update(this.player.currentLyricLines());
+    service.updateStatus(this.player.state().playing);
+    this.updateStatus();
+  }
+
+  private async toggleLyrics(): Promise<void> {
+    const enabled = !getConfig().lyricsOverlay.enabled;
+    await vscode.workspace.getConfiguration("neteaseMusic").update("lyricsOverlay.enabled", enabled, vscode.ConfigurationTarget.Global);
+    if (enabled) await this.startLyricsOverlay();
+    else {
+      this.lyricsOverlay?.stop();
+      this.lyricsOverlay = undefined;
+    }
+    this.updateStatus();
+  }
+
+  private async startSmtc(): Promise<void> {
+    if (process.platform !== "win32") return;
+    const record = await this.components.nativeRecord().catch(() => undefined);
+    if (!record?.entryPath || record.status !== "ready") return;
+    this.smtc = new SmtcService((action) => {
+      const playing = this.player.state().playing;
+      if (action === "play") {
+        if (!playing) void this.player.toggle();
+      } else if (action === "pause" || action === "stop") {
+        if (playing) void this.player.pause();
+      } else if (action === "next") {
+        void this.player.next(true);
+      } else if (action === "previous") {
+        void this.player.previous();
+      }
+    });
+    this.smtc.start(record.entryPath);
+    this.smtc.update(this.player.state());
   }
 
   async activate(): Promise<void> {
@@ -220,14 +352,18 @@ export class App implements vscode.Disposable {
       log.warn("playback restore failed", String(err));
     }
     this.updateStatus();
-    this.startMarquee();
     if (getConfig().ui.autoOpen) {
       this.mainPanel.createOrShow();
       void this.openRecommend().catch((err) => log.warn("recommend failed", String(err)));
     }
     void this.refreshUserPlaylists().catch(() => undefined);
     void this.pushComponents();
-    void this.ensureNative().catch((err) => log.warn("ensureNative failed", String(err)));
+    void this.ensureNative()
+      .then(() => {
+        const cfg = getConfig();
+        if (cfg.lyricsOverlay.enabled && cfg.lyricsOverlay.startOnLaunch) void this.startLyricsOverlay();
+      })
+      .catch((err) => log.warn("ensureNative failed", String(err)));
   }
 
   private registerViews(): void {
@@ -254,11 +390,33 @@ export class App implements vscode.Disposable {
         this.broadcast({ type: "downloads", tasks });
         this.pushSidebar();
       }),
-      this.player.onDidChange(() => this.updateStatus()),
+      this.player.onDidChange(() => {
+        const outputKind = this.player.state().output.kind;
+        if (outputKind !== this.lastOutputKind) {
+          this.lastOutputKind = outputKind;
+          this.pushSettings();
+        }
+        this.updateStatus();
+        this.smtc?.update(this.player.state());
+        this.lyricsOverlay?.update(this.player.currentLyricLines());
+        this.lyricsOverlay?.updateStatus(this.player.state().playing);
+      }),
       vscode.window.onDidChangeActiveColorTheme((theme) =>
         this.broadcast({ type: "theme", kind: String(theme.kind) }),
       ),
       vscode.workspace.onDidChangeConfiguration((event) => {
+        if (event.affectsConfiguration("neteaseMusic.lyricsOverlay")) {
+          void this.loadSystemFonts();
+          if (event.affectsConfiguration("neteaseMusic.lyricsOverlay.enabled")) {
+            void this.startLyricsOverlay();
+          } else {
+            this.lyricsOverlay?.applyStyle(getConfig().lyricsOverlay);
+          }
+        }
+        if (event.affectsConfiguration("neteaseMusic.output.backend") && !this.autoConfiguring && !this.probing) {
+          this.probing = true;
+          void this.probeAudio(false).catch(() => undefined).finally(() => { this.probing = false; });
+        }
         if (!event.affectsConfiguration("neteaseMusic")) return;
         this.pushSettings();
         if (event.affectsConfiguration("neteaseMusic.output")) void this.player.refreshOutput();
@@ -292,6 +450,10 @@ export class App implements vscode.Disposable {
     ) {
       const target = this.audioOwner === "main" && this.mainPanel.isReady ? this.mainPanel : this.sidebar;
       target.post(msg);
+      return;
+    }
+    if (msg.type === "spectrum") {
+      if (this.mainPanel.isReady) this.mainPanel.post(msg);
       return;
     }
     if (msg.type === "playerError" || msg.type === "toast") {
@@ -387,6 +549,11 @@ export class App implements vscode.Disposable {
   }
 
   private async settingsState(): Promise<SettingsState> {
+    if (!this.probing && this.player.state().output.kind !== "native" && Date.now() - this.outputProbeAt > 5000) {
+      this.outputProbeAt = Date.now();
+      this.probing = true;
+      void this.probeAudio(false).catch(() => undefined).finally(() => { this.probing = false; });
+    }
     return {
       account: this.session.accountInfo,
       settings: this.settingsView(),
@@ -405,7 +572,7 @@ export class App implements vscode.Disposable {
   private resourceStats() {
     const cfg = getConfig();
     const extension = safeDirStats(this.ctx.extensionPath);
-    const cache = safeDirStats(cfg.cache.dir || defaultCacheDir(this.ctx), /\.(flac|mp3|m4a|wav|ogg)$/i);
+    const cache = safeDirStats(cfg.cache.dir || defaultCacheDir(this.ctx), /\.(flac|mp3|part)$/i);
     const download = safeDirStats(this.downloads.dir, /\.(flac|mp3|m4a|wav|ogg)$/i);
     const coverDir = cfg.cover.dir || path.join(this.downloads.dir, "covers");
     const cover = safeDirStats(coverDir, /\.(png|jpe?g|webp|gif)$/i);
@@ -434,12 +601,29 @@ export class App implements vscode.Disposable {
       version: String(this.ctx.extension.packageJSON.version ?? "0.0.0"),
       stats: this.resourceStats(),
       showTitle: cfg.status.showTitle,
+      showLyricsButton: cfg.status.showLyrics,
       showLike: cfg.status.showLike,
       showFavorite: cfg.status.showFavorite,
       showMode: cfg.status.showMode,
       showNavigation: cfg.status.showNavigation,
       showBuffer: cfg.status.showBuffer,
       showQueue: cfg.status.showQueue,
+      lyricsEnabled: cfg.lyricsOverlay.enabled,
+      lyricsStartOnLaunch: cfg.lyricsOverlay.startOnLaunch,
+      lyricsFont: cfg.lyricsOverlay.font,
+      lyricsSize: cfg.lyricsOverlay.size,
+      lyricsColor: cfg.lyricsOverlay.color,
+      lyricsOpacity: cfg.lyricsOverlay.opacity,
+      lyricsWidth: cfg.lyricsOverlay.width,
+      lyricsHeight: cfg.lyricsOverlay.height,
+      lyricsLocked: cfg.lyricsOverlay.locked,
+      lyricsX: cfg.lyricsOverlay.x,
+      lyricsY: cfg.lyricsOverlay.y,
+      lyricsWeight: cfg.lyricsOverlay.weight,
+      lyricsFontFile: cfg.lyricsOverlay.fontFile,
+      lyricsBorderWidth: cfg.lyricsOverlay.borderWidth,
+      lyricsBorderColor: cfg.lyricsOverlay.borderColor,
+      fonts: this.systemFonts,
       shortcuts: this.shortcutValues(),
       quality: cfg.quality,
       downloadQuality: cfg.download.quality === "auto" ? "auto" : QUALITY_LABELS[cfg.download.quality] ?? cfg.download.quality,
@@ -447,6 +631,7 @@ export class App implements vscode.Disposable {
       coverDir: cfg.cover.dir || path.join(this.downloads.dir, "covers"),
       coverFilenameTemplate: cfg.cover.filenameTemplate,
       cacheDir: cfg.cache.dir || defaultCacheDir(this.ctx),
+      cacheLocked: this.player.state().output.kind === "native",
       localMusicDir: cfg.localMusic.dir || this.downloads.dir,
       componentsDir: this.components.rootDir,
       outputMode: cfg.output.mode,
@@ -456,12 +641,15 @@ export class App implements vscode.Disposable {
       sampleFormat: cfg.output.sampleFormat,
       exclusive: cfg.output.exclusive,
       bitPerfect: cfg.output.bitPerfect,
+      persistentSeek: cfg.output.persistentSeek,
+      hrtf: cfg.output.hrtf,
       nativeBackend: cfg.output.backend,
       bufferMs: cfg.output.bufferMs,
       volume: Math.round(cfg.playback.volume),
       mode: cfg.playback.mode,
       backgroundPlay: cfg.playback.backgroundPlay,
       autoPlay: cfg.playback.autoPlay,
+      startOnLaunch: cfg.playback.startOnLaunch,
       rememberQueue: cfg.playback.rememberQueue,
       themeMode: cfg.ui.theme,
       compact: cfg.ui.compact,
@@ -527,6 +715,7 @@ export class App implements vscode.Disposable {
       active: this.activeNav,
       collapsed: getConfig().ui.panels,
       version: String(this.ctx.extension.packageJSON.version ?? "0.0.0"),
+      listen: this.listen,
     };
   }
 
@@ -560,6 +749,7 @@ export class App implements vscode.Disposable {
         else if (nav === "podcast") await this.openPodcast();
         else if (nav === "roam") await this.openRoam();
         else if (nav === "following") await this.openFollowing();
+        else if (nav === "friends") await this.openFriends();
         else if (nav === "recent") await this.openRecent();
         else if (nav === "collections") await this.openCollections();
         else if (nav === "downloads") await this.openDownloads();
@@ -580,6 +770,42 @@ export class App implements vscode.Disposable {
       case "createPlaylist":
         await this.createPlaylist();
         break;
+      case "resetLyricsSettings": {
+        const config = vscode.workspace.getConfiguration("neteaseMusic");
+        const defaults: Record<string, unknown> = {
+          "lyricsOverlay.font": "Microsoft YaHei UI",
+          "lyricsOverlay.size": 30,
+          "lyricsOverlay.color": "#ffffff",
+          "lyricsOverlay.weight": 600,
+          "lyricsOverlay.borderWidth": 1,
+          "lyricsOverlay.borderColor": "#ffffff",
+          "lyricsOverlay.opacity": 85,
+          "lyricsOverlay.width": 900,
+          "lyricsOverlay.height": 220,
+          "lyricsOverlay.locked": false,
+          "lyricsOverlay.x": -1,
+          "lyricsOverlay.y": -1,
+          "lyricsOverlay.fontFile": "",
+        };
+        for (const [key, value] of Object.entries(defaults)) {
+          await config.update(key, value, vscode.ConfigurationTarget.Global);
+        }
+        this.lyricsOverlay?.applyStyle(getConfig().lyricsOverlay);
+        this.pushSettings();
+        break;
+      }
+      case "chooseFontFile": {
+        const picked = await vscode.window.showOpenDialog({
+          canSelectMany: false,
+          filters: { 字体: ["ttf", "otf", "ttc"] },
+          openLabel: "选择字体文件",
+        });
+        if (picked?.[0]) {
+          await vscode.workspace.getConfiguration("neteaseMusic").update("lyricsOverlay.fontFile", picked[0].fsPath, vscode.ConfigurationTarget.Global);
+          this.pushSettings();
+        }
+        break;
+      }
       case "choosePlaylistCover": {
         const id = Number(payload.id ?? 0);
         if (!id) return;
@@ -606,6 +832,29 @@ export class App implements vscode.Disposable {
       case "openSongDetail":
         await this.openSongDetail(Number(payload.id));
         break;
+      case "followSongDetail":
+        this.followingSong = true;
+        try {
+          await this.openSongDetail(Number(payload.id));
+        } finally {
+          this.followingSong = false;
+        }
+        break;
+      case "immersive": {
+        const active = Boolean(payload.active);
+        try {
+          if (active && !this.immersiveSidebarHidden) {
+            await vscode.commands.executeCommand("workbench.action.closeSidebar");
+            this.immersiveSidebarHidden = true;
+          } else if (!active && this.immersiveSidebarHidden) {
+            await vscode.commands.executeCommand("workbench.action.toggleSidebarVisibility");
+            this.immersiveSidebarHidden = false;
+          }
+        } catch {
+          /* sidebar command unavailable in some builds */
+        }
+        break;
+      }
       case "openSongComments": {
         const id = Number(payload.id ?? this.currentPage.song?.track.id ?? 0);
         if (id) await this.openComments({ resource: commentResource("song", id), id, offset: 0 });
@@ -616,6 +865,51 @@ export class App implements vscode.Disposable {
         if (id) await this.postSongComment(id, String(payload.content ?? ""));
         break;
       }
+      case "loadCommentReplies": {
+        const parentId = Number(payload.parentId ?? 0);
+        const resource = String(payload.resource ?? this.commentsTarget?.resource ?? "");
+        const id = Number(payload.id ?? this.commentsTarget?.id ?? 0);
+        if (!parentId || !resource || !id) break;
+        try {
+          const result = await this.session.client.commentReplies(resource, id, parentId, 30, 0);
+          this.mainPanel.post({ type: "commentReplies", parentId, comments: result.comments, total: result.total, more: result.comments.length < result.total });
+        } catch (err) {
+          this.mainPanel.post({ type: "commentReplies", parentId, comments: [], total: 0, more: false, error: (err as Error).message });
+        }
+        break;
+      }
+      case "likeComment": {
+        const commentId = Number(payload.commentId ?? 0);
+        const resource = String(payload.resource ?? this.commentsTarget?.resource ?? "");
+        const id = Number(payload.id ?? this.commentsTarget?.id ?? 0);
+        if (!commentId || !resource || !id) break;
+        const like = !Boolean(payload.liked);
+        const current = Number(payload.likedCount ?? 0);
+        await this.session.client.likeComment(resource, commentId, like);
+        this.mainPanel.post({ type: "commentLike", commentId, liked: like, likedCount: Math.max(0, current + (like ? 1 : -1)) });
+        break;
+      }
+      case "replyComment": {
+        const parentId = Number(payload.parentId ?? 0);
+        const resource = String(payload.resource ?? this.commentsTarget?.resource ?? "");
+        const id = Number(payload.id ?? this.commentsTarget?.id ?? 0);
+        const content = String(payload.content ?? "").trim();
+        if (!parentId || !resource || !id || !content) break;
+        await this.session.client.addComment(resource, content, parentId);
+        this.toast("回复已发送", "success");
+        await this.openComments({ resource, id, offset: 0 });
+        break;
+      }
+      case "openFriendChat":
+        await this.openFriendChat(Number(payload.uid));
+        break;
+      case "sendFriendMessage":
+        await this.sendFriendMessage(String(payload.content ?? ""));
+        break;
+      case "copyText":
+        await vscode.env.clipboard.writeText(String(payload.text ?? ""));
+        this.toast("链接已复制", "success");
+        break;
       case "openUser":
         await this.openUser(Number(payload.uid));
         break;
@@ -673,6 +967,7 @@ export class App implements vscode.Disposable {
         await this.ensureAudioHost();
         const track = payload.track as Track | undefined;
         if (!track) return;
+        if (await this.playInListenRoom(track)) break;
         const list = Array.isArray(payload.list) && payload.list.length ? (payload.list as Track[]) : undefined;
         const index = Number.isFinite(payload.index) ? Number(payload.index) : undefined;
         await this.player.playTrack(track, list, index, payload.source as any);
@@ -698,6 +993,7 @@ export class App implements vscode.Disposable {
         if (payload.track) this.player.playNext(payload.track as Track, payload.source as any);
         break;
       case "playPause":
+        if (await this.localListenControl("toggle")) break;
         await this.ensureAudioHost();
         await this.player.toggle();
         break;
@@ -705,14 +1001,30 @@ export class App implements vscode.Disposable {
         await this.player.setVolume(Math.max(0, Math.min(100, Number(payload.value ?? 80))) / 100);
         break;
       case "next":
+        if (await this.localListenControl("next")) break;
         await this.player.next(true);
         break;
       case "previous":
+        if (await this.localListenControl("previous")) break;
         await this.player.previous();
         break;
-      case "seek":
-        await this.player.seek(Number(payload.value));
+      case "seek": {
+        const target = Number(payload.value);
+        if (this.listen.status === "connected") {
+          const sent = await this.sendListenPlayCommand("PROGRESS", undefined, Math.round(target * 1000));
+          if (sent) {
+            this.listenBase = {
+              trackId: this.player.current?.id ?? 0,
+              progress: target,
+              at: Date.now(),
+              playing: this.player.state().playing,
+            };
+            this.listenLastProgress = target;
+          }
+        }
+        await this.player.seek(target);
         break;
+      }
       case "volume":
         await this.player.setVolume(Number(payload.value));
         break;
@@ -775,13 +1087,20 @@ export class App implements vscode.Disposable {
         const playlistId = Number(payload.playlistId);
         const trackId = Number(payload.trackId);
         if (!playlistId || !trackId) return;
-        await this.session.client.removeTrackFromPlaylist(playlistId, trackId);
+        this.playlistCache.delete(playlistId);
+    await this.session.client.removeTrackFromPlaylist(playlistId, trackId);
         this.toast("已从歌单删除", "success");
         await this.openPlaylist(playlistId);
         break;
       }
       case "qualityPicker":
         await vscode.commands.executeCommand("neteaseMusic.qualityPicker");
+        break;
+      case "joinListen":
+        await this.joinListenTogether(String(payload.input ?? ""));
+        break;
+      case "leaveListen":
+        this.leaveListenTogether();
         break;
       case "sleepTimer":
         await this.pickSleepTimer();
@@ -916,6 +1235,32 @@ export class App implements vscode.Disposable {
         await vscode.workspace
           .getConfiguration("neteaseMusic")
           .update(key, payload.value, vscode.ConfigurationTarget.Global);
+        if (key === "output.exclusive" && payload.value === false) {
+          const configuration = vscode.workspace.getConfiguration("neteaseMusic");
+          if (configuration.get<boolean>("output.bitPerfect")) {
+            await configuration.update("output.bitPerfect", false, vscode.ConfigurationTarget.Global);
+            this.toast("关闭独占模式时已同时关闭 Bit-perfect；Bit-perfect 会强制 Exclusive。", "info");
+          }
+        }
+        if (key === "output.bitPerfect" && payload.value === true) {
+          await vscode.workspace.getConfiguration("neteaseMusic").update("output.exclusive", true, vscode.ConfigurationTarget.Global);
+        }
+        if (key === "output.hrtf" && payload.value === true) {
+          await vscode.workspace.getConfiguration("neteaseMusic").update("output.bitPerfect", false, vscode.ConfigurationTarget.Global);
+        }
+        if (key === "output.bitPerfect" && payload.value === true) {
+          await vscode.workspace.getConfiguration("neteaseMusic").update("output.hrtf", false, vscode.ConfigurationTarget.Global);
+        }
+        if (key === "output.bitPerfect" && payload.value === true) {
+          void vscode.window.showWarningMessage(
+            "启用 Bit-perfect 后，PC 端音量将固定为 100%。请先调整好您的前端（小尾巴/大尾巴/解码器/放大器）音量！",
+            { modal: true },
+            "知道了",
+          );
+        }
+        if (key === "cache.maxSizeMB" || key === "cache.dir" || key === "cache.enabled") {
+          await this.player.pruneCacheNow();
+        }
         if (key === "playback.volume") {
           await this.player.setVolume(Number(payload.value) / 100);
         } else if (key === "playback.mode") {
@@ -923,7 +1268,15 @@ export class App implements vscode.Disposable {
         }
         this.pushSettings();
         this.pushSidebar();
+        if (key === "lyricsOverlay.enabled") await this.startLyricsOverlay();
+        else if (key.startsWith("lyricsOverlay.")) this.lyricsOverlay?.applyStyle(getConfig().lyricsOverlay);
+        if ((key === "output.exclusive" || key === "output.bitPerfect") && payload.value === false) {
+          await this.player.releaseNativeOutput();
+        }
         if (key.startsWith("output.")) await this.player.refreshOutput();
+        if ((key === "output.hrtf" || key === "output.bitPerfect" || key === "output.exclusive" || key === "output.backend" || key === "output.device") && this.player.isPlaying) {
+          await this.player.restartCurrent();
+        }
         this.updateStatus();
         break;
       }
@@ -954,7 +1307,7 @@ export class App implements vscode.Disposable {
         await vscode.commands.executeCommand("workbench.action.openSettingsJson");
         break;
       case "openVscodeSettings":
-        await vscode.commands.executeCommand("workbench.action.openSettings", "@ext:dsh.netease-music");
+        await vscode.commands.executeCommand("workbench.action.openSettings", "@ext:AICis.netease-music-vscode");
         break;
       case "openDocs":
         await this.openDocs();
@@ -1006,6 +1359,25 @@ export class App implements vscode.Disposable {
       case "restartApp":
         this.restartApp();
         break;
+      case "clearCache": {
+        const cfg = getConfig();
+        const dir = cfg.cache.dir || defaultCacheDir(this.ctx);
+        await fs.mkdir(dir, { recursive: true }).catch(() => undefined);
+        let removed = 0;
+        let failed = 0;
+        const entries = await fs.readdir(dir, { withFileTypes: true }).catch(() => []);
+        for (const entry of entries) {
+          try {
+            await fs.rm(path.join(dir, entry.name), { recursive: true, force: true });
+            removed += 1;
+          } catch {
+            failed += 1;
+          }
+        }
+        this.pushSettings();
+        this.toast(failed ? `缓存已清除 ${removed} 项，${failed} 项正在使用` : "缓存已清除", failed ? "info" : "success");
+        break;
+      }
       case "openDir": {
         const kind = String(payload.dir ?? "");
         const cfg = getConfig();
@@ -1052,7 +1424,7 @@ export class App implements vscode.Disposable {
 
   private setPage(page: PageView): void {
     const previous = this.currentPage;
-    if (!this.navigatingBack && previous && !previous.loading && pageKey(previous) !== pageKey(page)) {
+    if (!this.navigatingBack && !this.followingSong && previous && !previous.loading && pageKey(previous) !== pageKey(page)) {
       this.pageHistory.push(previous);
       if (this.pageHistory.length > 50) this.pageHistory.shift();
     }
@@ -1188,6 +1560,80 @@ export class App implements vscode.Disposable {
     this.setPage({ kind: "following", title: "关注", following: artists });
   }
 
+  private async openFriends(): Promise<void> {
+    if (this.friendPoll) clearInterval(this.friendPoll);
+    this.friendPoll = undefined;
+    this.activeNav = "friends";
+    this.pushSidebar();
+    this.setPage({ kind: "friends", title: "好友", loading: true, friends: { friends: [], messages: [] } });
+    this.mainPanel.createOrShow();
+    const [conversations, follows] = await Promise.all([
+      this.session.client.privateConversations(100).catch(() => []),
+      this.session.client.friends(100).catch(() => []),
+    ]);
+    if (this.activeNav !== "friends") return;
+    const order = new Map(conversations.map((friend, index) => [friend.userId, index]));
+    const list = [...follows].sort((a, b) => (order.get(a.userId) ?? 9999) - (order.get(b.userId) ?? 9999));
+    this.setPage({ kind: "friends", title: "好友", friends: { friends: list, messages: [] } });
+  }
+
+  private async openFriendChat(userId: number): Promise<void> {
+    const page = this.currentPage;
+    if (page.kind !== "friends" || !page.friends || !userId) return;
+    const friend = page.friends.friends.find((item) => item.userId === userId);
+    if (!friend) return;
+    this.setPage({
+      ...page,
+      friends: { ...page.friends, activeId: userId, messages: [], loading: true, error: undefined },
+    });
+    try {
+      const messages = await this.session.client.privateHistory(userId, 100);
+      this.setPage({
+        ...this.currentPage,
+        friends: { ...(this.currentPage.friends ?? page.friends), activeId: userId, messages, loading: false },
+      });
+      this.scheduleFriendPoll(userId);
+    } catch (err) {
+      this.setPage({
+        ...this.currentPage,
+        friends: { ...(this.currentPage.friends ?? page.friends), activeId: userId, loading: false, error: (err as Error).message },
+      });
+    }
+  }
+
+  private scheduleFriendPoll(userId: number): void {
+    if (this.friendPoll) clearInterval(this.friendPoll);
+    this.friendPoll = setInterval(async () => {
+      const page = this.currentPage;
+      if (page.kind !== "friends" || page.friends?.activeId !== userId || page.friends.loading) return;
+      try {
+        const messages = await this.session.client.privateHistory(userId, 100);
+        if (this.currentPage.kind !== "friends" || this.currentPage.friends?.activeId !== userId) return;
+        const current = this.currentPage;
+        this.currentPage = {
+          ...current,
+          friends: { ...(current.friends ?? page.friends!), messages },
+        };
+        this.mainPanel.post({ type: "friendMessages", activeId: userId, messages });
+      } catch {
+        /* keep existing messages */
+      }
+    }, 2000);
+  }
+
+  private async sendFriendMessage(content: string): Promise<void> {
+    const page = this.currentPage;
+    const activeId = page.kind === "friends" ? page.friends?.activeId : undefined;
+    const text = content.trim();
+    if (!activeId || !text) return;
+    try {
+      await this.session.client.sendPrivateMessage(activeId, text);
+      await this.openFriendChat(activeId);
+    } catch (err) {
+      this.toast(`发送私信失败：${(err as Error).message}`, "error");
+    }
+  }
+
   private async openRecent(): Promise<void> {
     this.activeNav = "recent";
     this.pushSidebar();
@@ -1246,6 +1692,18 @@ export class App implements vscode.Disposable {
   private async openPlaylist(id: number): Promise<void> {
     if (!Number.isFinite(id) || id <= 0) throw new Error("无效的歌单 ID");
     const liked = this.userPlaylists.find((playlist) => playlist.specialType === 5);
+    const cached = this.playlistCache.get(id);
+    if (cached) {
+      this.activePlaylist = cached;
+      this.activeNav = liked?.id === id ? "liked" : `playlist:${id}`;
+      this.pushSidebar();
+      this.mainPanel.createOrShow();
+      this.commentsTarget = { resource: commentResource("playlist", id), id, kind: "playlist" };
+      this.commentsView = undefined;
+      this.subscribersView = undefined;
+      this.setPage({ kind: "playlist", title: cached.playlist.name, playlist: cached, activeTab: "songs" });
+      return;
+    }
     this.activeNav = liked?.id === id ? "liked" : `playlist:${id}`;
     this.pushSidebar();
     this.setPage({ kind: "playlist", title: "正在加载…", loading: true });
@@ -1258,6 +1716,11 @@ export class App implements vscode.Disposable {
       throw err;
     }
     this.activePlaylist = detail;
+    this.playlistCache.set(id, detail);
+    if (this.playlistCache.size > 3) {
+      const oldest = this.playlistCache.keys().next().value;
+      if (oldest !== undefined) this.playlistCache.delete(oldest);
+    }
     if (detail.playlist.specialType === 5 || liked?.id === id) {
       this.player.markLiked(detail.tracks.map((track) => track.id));
     }
@@ -1298,6 +1761,25 @@ export class App implements vscode.Disposable {
     this.activeNav = "song";
     this.pushSidebar();
     this.mainPanel.createOrShow();
+    this.setPage({
+      kind: "song",
+      title: track.name,
+      loading: false,
+      song: { track, lyric: { lrc: "", translation: "" }, composerNames: [] },
+    });
+    const lyricPromise = !track.localPath && id > 0
+      ? this.session.client.lyric(id).catch((err) => {
+          log.debug("song lyric unavailable", String(err));
+          return { lrc: "", translation: "" };
+        })
+      : Promise.resolve({ lrc: "", translation: "" });
+    if (id > 0) {
+      const likedCount = await this.session.client.songRedCount(id).catch(() => 0);
+      if (likedCount > 0) track = { ...track, likedCount };
+    }
+    this.activeNav = "song";
+    this.pushSidebar();
+    this.mainPanel.createOrShow();
 
     if (track.localPath) {
       this.commentsTarget = id > 0 ? { resource: commentResource("song", id), id, kind: "song" } : undefined;
@@ -1332,12 +1814,7 @@ export class App implements vscode.Disposable {
       loading: true,
       song: { track, lyric: { lrc: "", translation: "" }, composerNames: [] },
     });
-    let lyric = { lrc: "", translation: "" };
-    try {
-      lyric = await this.session.client.lyric(id);
-    } catch (err) {
-      log.debug("song lyric unavailable", String(err));
-    }
+    const lyric = await lyricPromise;
     const composerNames = parseComposers(lyric.lrc);
     this.commentsTarget = { resource: commentResource("song", id), id, kind: "song" };
     this.commentsView = undefined;
@@ -1361,7 +1838,7 @@ export class App implements vscode.Disposable {
     });
   }
 
-  private async openFavorite(trackId: number): Promise<void> {
+  private async openFavorite(trackId: number, toggle = false): Promise<void> {
     if (!trackId) throw new Error("无效的歌曲 ID");
     if (trackId < 0) throw new Error("本地音乐没有关联的网易云歌曲，无法收藏到歌单");
     if (!this.session.loggedIn) {
@@ -1373,11 +1850,12 @@ export class App implements vscode.Disposable {
       .filter((playlist) => playlist.specialType !== 5)
       .map((playlist) => this.toPlaylistRef(playlist));
     this.mainPanel.createOrShow();
-    this.mainPanel.post({ type: "favoritePicker", trackId, playlists });
+    this.mainPanel.post({ type: toggle ? "toggleFavoritePicker" : "favoritePicker", trackId, playlists });
   }
 
   private async addFavorite(playlistId: number, trackId: number): Promise<void> {
     if (!playlistId || !trackId) throw new Error("请选择歌单");
+    this.playlistCache.delete(playlistId);
     await this.session.client.addTrackToPlaylist(playlistId, trackId);
     this.toast("已收藏到歌单", "success");
     this.mainPanel.post({ type: "toast", kind: "success", message: "已收藏到歌单" });
@@ -1615,7 +2093,26 @@ export class App implements vscode.Disposable {
         view: { total: 0, hot: [], comments: [], loading: true, more: false, offset: 0 },
       });
     }
-    const result = await this.session.client.comments(resource, id, 30, offset);
+    let result: { comments: Comment[]; hot: Comment[]; total: number };
+    try {
+      result = await Promise.race([
+        this.session.client.comments(resource, id, 30, offset),
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error("评论请求超时")), 12000)),
+      ]);
+    } catch (err) {
+      const view: CommentsView = {
+        total: 0,
+        hot: [],
+        comments: [],
+        loading: false,
+        more: false,
+        offset: 0,
+        error: `评论区加载失败：${(err as Error).message}`,
+      };
+      this.commentsView = view;
+      this.mainPanel.post({ type: "comments", view });
+      return;
+    }
     this.commentsOffset = offset;
     const previous = offset && this.commentsView ? this.commentsView : undefined;
     const view: CommentsView = {
@@ -1716,10 +2213,274 @@ export class App implements vscode.Disposable {
   // ---------------------------------------------------------------- quality
 
   private async setPlaybackQuality(quality: Quality): Promise<void> {
-    await this.player.setQuality(quality);
+    const configuration = vscode.workspace.getConfiguration("neteaseMusic");
+    const wasActive = this.player.isPlaying || this.player.state().loading;
+    await this.player.releaseNativeOutput();
+    const hadHrtf = configuration.get<boolean>("output.hrtf") ?? false;
+    if (quality === "sky") {
+      await configuration.update("output.bitPerfect", false, vscode.ConfigurationTarget.Global);
+      await configuration.update("output.hrtf", true, vscode.ConfigurationTarget.Global);
+    } else {
+      await configuration.update("output.hrtf", false, vscode.ConfigurationTarget.Global);
+    }
+    await this.player.refreshOutput();
+    await this.player.setQuality(quality, wasActive);
     this.toast(`音质请求已切换为：${QUALITY_LABELS[quality] ?? quality}`, "success");
+    if (quality === "sky") {
+      this.toast("沉浸环绕声：已关闭 Bit-perfect，已开启双声道空间增强（HRTF）。", "info");
+    } else if (hadHrtf) {
+      this.toast("已关闭双声道空间增强（HRTF）；Bit-perfect 不会自动开启。", "info");
+    }
     this.pushSettings();
     this.updateStatus();
+  }
+
+  private parseListenInvite(input: string): { roomId: string; inviterId: string } {
+    const text = decodeURIComponent(input.trim());
+    const room = /(?:roomId|room_id|roomid)["'=:\s]+([A-Za-z0-9_-]+)/i.exec(text);
+    const inviter = /(?:inviterId|inviter_id|inviter)["'=:\s]+(\d+)/i.exec(text);
+    if (room?.[1] && inviter?.[1]) return { roomId: room[1], inviterId: inviter[1] };
+    const numbers = text.match(/\d{5,}/g) ?? [];
+    if (numbers.length >= 2) return { roomId: numbers[0]!, inviterId: numbers[1]! };
+    throw new Error("无法解析房间信息：请粘贴官方邀请链接，或 roomId + inviterId");
+  }
+
+  private async joinListenTogether(input: string): Promise<void> {
+    if (!this.session.loggedIn) {
+      this.toast("请先登录网易云音乐", "error");
+      return;
+    }
+    try {
+      const { roomId, inviterId } = this.parseListenInvite(input);
+      this.listen = { status: "joining", roomId, inviterId, message: "正在接受邀请…" };
+      this.pushSidebar();
+      await this.session.client.acceptListenTogether(roomId, inviterId);
+      this.listenRoomId = roomId;
+      await this.refreshListenRoom();
+      this.scheduleListenPoll();
+      this.toast("已加入一起听房间", "success");
+    } catch (err) {
+      this.listen = { ...this.listen, status: "error", message: (err as Error).message };
+      this.pushSidebar();
+      this.toast(`加入一起听失败：${(err as Error).message}`, "error");
+    }
+  }
+
+  private async refreshListenRoom(): Promise<void> {
+    if (!this.listenRoomId) return;
+    const room = await this.session.client.listenTogetherRoom(this.listenRoomId);
+    const command = room.playCommand ?? {};
+    const trackId = Number(command.targetSongId ?? 0);
+    this.listenCommand = {
+      targetSongId: Number(command.targetSongId ?? 0),
+      formerSongId: Number(command.formerSongId ?? command.targetSongId ?? 0),
+      clientSeq: Number(command.clientSeq ?? 0),
+    };
+    this.listenList = (room.playlist?.displayList?.result ?? [])
+      .map((item) => Number(typeof item === "object" ? item.songId : item))
+      .filter((id) => Number.isFinite(id) && id > 0);
+    this.listenVersions = (room.playlist?.version ?? []).map((item) => ({ userId: Number(item.userId), version: Number(item.version) }));
+    this.listenPlayMode = String(room.playlist?.playMode ?? "ORDER_LOOP");
+    const listKey = this.listenList.join(",");
+    if (listKey && listKey !== this.listenListKey) {
+      this.listenListKey = listKey;
+      try {
+        this.listenQueue = await this.session.client.songDetail(this.listenList);
+      } catch {
+        this.listenQueue = [];
+      }
+    }
+
+    let trackName = "";
+    let artists = "";
+    let track = this.listenTrack?.id === trackId ? this.listenTrack : undefined;
+    if (trackId && !track) {
+      try {
+        track = (await this.session.client.songDetail([trackId]))[0];
+        this.listenTrack = track;
+      } catch {
+        /* metadata is optional */
+      }
+    }
+    if (track) {
+      trackName = track.name;
+      artists = track.artists?.map((artist) => artist.name).join(" / ") ?? "";
+    }
+    const baseProgress = Number(command.progress ?? 0) / 1000;
+    const rawStatus = command.playStatus;
+    const playing =
+      rawStatus === 2 ||
+      String(rawStatus ?? "") === "2" ||
+      String(rawStatus ?? "").toUpperCase().startsWith("PLAY");
+    const now = Date.now();
+    const rawProgressChanged = Boolean(
+      this.listenLastProgress !== undefined &&
+      Math.abs(baseProgress - this.listenLastProgress) > 1.5,
+    );
+    this.listenLastProgress = baseProgress;
+    if (
+      !this.listenBase ||
+      this.listenBase.trackId !== trackId ||
+      this.listenBase.playing !== playing ||
+      rawProgressChanged
+    ) {
+      if (rawProgressChanged) this.listenForceSeek = true;
+      this.listenBase = { trackId, progress: baseProgress, at: now, playing };
+    }
+    const target = baseProgress + (playing ? (now - this.listenBase.at) / 1000 : 0);
+    if (track) await this.syncListenPlayback(track, target, playing);
+    this.listen = {
+      status: "connected",
+      roomId: this.listenRoomId,
+      inviterId: this.listen.inviterId,
+      trackId: trackId || undefined,
+      trackName: trackName || (trackId ? `歌曲 ${trackId}` : undefined),
+      artists,
+      position: target,
+      playing,
+      message: "手机端需保持一起听页面活跃",
+    };
+    this.pushSidebar();
+  }
+
+  private async playInListenRoom(track: Track): Promise<boolean> {
+    if (this.listen.status !== "connected" || !this.listenRoomId) return false;
+    try {
+      if (!this.listenList.includes(track.id)) {
+        const userId = Number(this.session.accountInfo?.userId ?? 0);
+        const versions = this.listenVersions.map((item) => ({ ...item }));
+        const mine = versions.find((item) => item.userId === userId);
+        if (mine) mine.version += 1;
+        else versions.push({ userId, version: 1 });
+        const anchorSong = this.listenCommand?.targetSongId ?? track.id;
+        const anchorIndex = Math.max(0, this.listenList.indexOf(anchorSong));
+        const display = [...this.listenList.map(String)];
+        if (!display.includes(String(track.id))) display.push(String(track.id));
+        await this.session.client.listenTogetherListCommand(this.listenRoomId, {
+          commandType: "ADD",
+          version: versions,
+          anchorSongId: "",
+          anchorPosition: -1,
+          randomList: display,
+          displayList: display,
+        });
+        this.listenVersions = versions;
+        this.listenList = [...this.listenList, track.id];
+        this.listenQueue = [...this.listenQueue, track];
+        await new Promise((resolve) => setTimeout(resolve, 1500));
+      }
+      if (!(await this.sendListenPlayCommand("GOTO", track.id))) return false;
+      const queue = this.listenQueue.length ? this.listenQueue : [track];
+      const index = Math.max(0, queue.findIndex((item) => item.id === track.id));
+      await this.player.playTrack(track, queue, index);
+      return true;
+    } catch (err) {
+      this.toast(`一起听选歌失败：${(err as Error).message}`, "error");
+      return false;
+    }
+  }
+
+  private async sendListenPlayCommand(commandType: "PLAY" | "PAUSE" | "GOTO" | "PROGRESS", targetSongId?: number, positionMs?: number): Promise<boolean> {
+    if (this.listen.status !== "connected" || !this.listenRoomId) return false;
+    const previous = this.listenCommand;
+    const target = targetSongId ?? previous?.targetSongId ?? this.player.current?.id ?? 0;
+    if (!target) return false;
+    const former = previous?.formerSongId || target;
+    const clientSeq = (previous?.clientSeq ?? 0) + 1;
+    const base = {
+      commandType,
+      progress: commandType === "GOTO" ? 0 : Math.round(positionMs ?? this.player.state().position * 1000),
+      formerSongId: String(former),
+      targetSongId: String(target),
+      clientSeq,
+    };
+    const payloads = commandType === "GOTO"
+      ? [{ ...base, playStatus: 2 }, { ...base, playStatus: "PLAY" }]
+      : [
+          { ...base, playStatus: commandType === "PAUSE" ? 1 : 2 },
+          { ...base, playStatus: commandType === "PAUSE" ? "PAUSE" : "PLAY" },
+        ];
+    let lastError: unknown;
+    for (const command of payloads) {
+      try {
+        await this.session.client.listenTogetherPlayCommand(this.listenRoomId, command);
+        this.listenCommand = { targetSongId: target, formerSongId: former, clientSeq };
+        return true;
+      } catch (err) {
+        lastError = err;
+      }
+    }
+    this.toast(`一起听控制失败：${(lastError as Error)?.message ?? "未知错误"}`, "error");
+    return false;
+  }
+
+  private async localListenControl(action: "toggle" | "next" | "previous"): Promise<boolean> {
+    if (this.listen.status !== "connected") return false;
+    if (action === "toggle") {
+      const playing = this.player.state().playing;
+      const sent = await this.sendListenPlayCommand(playing ? "PAUSE" : "PLAY");
+      if (sent) {
+        if (playing) await this.player.pause();
+        else await this.player.resume();
+      }
+      return sent;
+    }
+    const current = this.listenCommand?.targetSongId ?? this.player.current?.id ?? 0;
+    if (!current || !this.listenList.length) return false;
+    const index = this.listenList.indexOf(current);
+    if (index < 0) return false;
+    const next = action === "next"
+      ? (index + 1) % this.listenList.length
+      : (index - 1 + this.listenList.length) % this.listenList.length;
+    return this.sendListenPlayCommand("GOTO", this.listenList[next]);
+  }
+
+  private async syncListenPlayback(track: Track, target: number, playing: boolean): Promise<void> {
+    const current = this.player.current;
+    if (!current || current.id !== track.id) {
+      const queue = this.listenQueue.length ? this.listenQueue : [track];
+      const index = Math.max(0, queue.findIndex((item) => item.id === track.id));
+      await this.player.playTrack(track, queue, index);
+      if (!playing) await this.player.pause();
+      if (target > 0.5) await this.player.seek(target);
+      return;
+    }
+    if (playing && !this.player.isPlaying) await this.player.resume();
+    if (!playing && this.player.isPlaying) await this.player.pause();
+    const state = this.player.state();
+    if (!state.loading && (this.listenForceSeek || Math.abs(state.position - target) > 1.5)) {
+      log.info("listen seek", { target, local: state.position, force: this.listenForceSeek });
+      this.listenForceSeek = false;
+      await this.player.seek(target);
+    }
+  }
+
+  private scheduleListenPoll(): void {
+    if (this.listenPoll) clearTimeout(this.listenPoll);
+    if (this.listen.status !== "connected") return;
+    this.listenPoll = setTimeout(async () => {
+      try {
+        await this.refreshListenRoom();
+      } catch (err) {
+        this.listen = { ...this.listen, message: `同步中断：${(err as Error).message}` };
+        this.pushSidebar();
+      }
+      this.scheduleListenPoll();
+    }, 1000);
+  }
+
+  private leaveListenTogether(): void {
+    if (this.listenPoll) clearTimeout(this.listenPoll);
+    this.listenPoll = undefined;
+    this.listenRoomId = "";
+    this.listenTrack = undefined;
+    this.listenBase = undefined;
+    this.listenQueue = [];
+    this.listenListKey = "";
+    this.listenList = [];
+    this.listenVersions = [];
+    this.listen = { status: "idle" };
+    this.pushSidebar();
   }
 
   private async setDownloadQuality(quality: string): Promise<void> {
@@ -1980,6 +2741,7 @@ export class App implements vscode.Disposable {
             sampleFormat: format.sampleFormat,
           })),
         }));
+        status.backends = probe.backends ?? [];
         status.backend = probe.backends?.join(" / ") ?? status.backend;
         status.version = probe.version ?? status.version;
       } else {
@@ -2017,8 +2779,18 @@ export class App implements vscode.Disposable {
     if (!record?.entryPath || record.status !== "ready") {
       throw new Error("原生引擎未安装或未启用，请先在设置 → 组件中安装并启用");
     }
-    const probe = await probeEngine(record.entryPath);
+    const [wasapiProbe, asioProbe] = await Promise.all([
+      probeEngine(record.entryPath, "wasapi"),
+      probeEngine(record.entryPath, "asio"),
+    ]);
+    const probe: EngineProbe = {
+      ...wasapiProbe,
+      ok: wasapiProbe.ok || asioProbe.ok,
+      devices: [...(wasapiProbe.devices ?? []), ...(asioProbe.devices ?? [])],
+      backends: [...new Set([...(wasapiProbe.backends ?? []), ...(asioProbe.backends ?? [])])],
+    };
     this.probeCache = { path: record.entryPath, probe, at: Date.now() };
+    await this.autoConfigureOutput(probe);
     await this.pushComponents();
     this.settingsPanel.post({ type: "engineInfo", info: await this.nativeStatus() });
     if (!probe.ok) throw new Error(probe.error ?? "原生引擎探测失败");
@@ -2026,26 +2798,63 @@ export class App implements vscode.Disposable {
     return probe;
   }
 
+  private async autoConfigureOutput(probe: EngineProbe): Promise<void> {
+    if (this.autoConfiguring) return;
+    const devices = probe.devices ?? [];
+    if (!devices.length) return;
+    this.autoConfiguring = true;
+    try {
+      const configuration = vscode.workspace.getConfiguration("neteaseMusic");
+      const cfg = getConfig();
+      const hasAsio = devices.some((device) => device.backend === "asio");
+      const backend = cfg.output.backend === "asio" && !hasAsio ? "wasapi" : cfg.output.backend;
+      if (!this.outputAutoInitialized) this.outputAutoInitialized = true;
+      const backendDevices = devices.filter((device) => device.backend === backend);
+      const defaultDevice = backendDevices.find((device) => device.isDefault) ?? backendDevices[0];
+      let selected: (typeof devices)[number] | undefined = backend === "asio" ? defaultDevice : defaultDevice ?? backendDevices[0];
+      if (backend !== cfg.output.backend) await configuration.update("output.backend", backend, vscode.ConfigurationTarget.Global);
+      const targetDevice = backend === "wasapi" ? "default" : selected?.id;
+      if (targetDevice && targetDevice !== cfg.output.device) {
+        await configuration.update("output.device", targetDevice, vscode.ConfigurationTarget.Global);
+      }
+    } finally {
+      this.autoConfiguring = false;
+    }
+  }
+
   private async selectDevice(): Promise<void> {
     const probe = await this.probeAudio(false);
     const devices = probe.devices ?? [];
-    const items: Array<vscode.QuickPickItem & { deviceId: string }> = [
+    const currentBackend = getConfig().output.backend;
+    const items: Array<vscode.QuickPickItem & { deviceId: string; backend?: "wasapi" | "asio" }> = [
       { label: "$(home) 系统默认设备", description: "由操作系统选择默认端点", deviceId: "default" },
       ...devices.map((device) => ({
         label: `$(device-desktop) ${device.name}`,
-        description: device.backend + (device.isDefault ? " · 默认" : ""),
+        description: `${device.backend}${device.isDefault ? " · 默认" : ""}${device.backend === currentBackend ? " · 当前后端" : ""}`,
         detail: device.formats.map((format) => `${format.sampleRate / 1000} kHz/${format.bits} bit`).join(" · "),
         deviceId: device.id,
+        backend: device.backend === "asio" ? "asio" as const : "wasapi" as const,
       })),
     ];
     const picked = await vscode.window.showQuickPick(items, {
-      placeHolder: "选择音频输出设备（写入 neteaseMusic.output.device）",
+      placeHolder: "选择音频输出设备（会同时切换对应后端）",
       matchOnDescription: true,
     });
     if (!picked) return;
-    await vscode.workspace
-      .getConfiguration("neteaseMusic")
-      .update("output.device", picked.deviceId, vscode.ConfigurationTarget.Global);
+    this.autoConfiguring = true;
+    try {
+      const configuration = vscode.workspace.getConfiguration("neteaseMusic");
+      await configuration.update("output.device", picked.deviceId, vscode.ConfigurationTarget.Global);
+      if (picked.backend) await configuration.update("output.backend", picked.backend, vscode.ConfigurationTarget.Global);
+      const chosen = devices.find((device) => device.id === picked.deviceId);
+      const bluetooth = Boolean(chosen && /bluetooth|蓝牙|hands-free|airpods|buds|wh-1000|wf-1000/i.test(chosen.name));
+      await configuration.update("output.mode", bluetooth ? "webaudio" : "native", vscode.ConfigurationTarget.Global);
+      await configuration.update("output.exclusive", !bluetooth, vscode.ConfigurationTarget.Global);
+      await configuration.update("output.bitPerfect", !bluetooth, vscode.ConfigurationTarget.Global);
+      if (!bluetooth) await configuration.update("output.hrtf", false, vscode.ConfigurationTarget.Global);
+    } finally {
+      this.autoConfiguring = false;
+    }
     this.pushSettings();
     this.toast(`输出设备已设为：${picked.label.replace(/\$\([^)]*\)\s*/, "")}`, "success");
   }
@@ -2296,6 +3105,9 @@ private async pickPlaybackRate(): Promise<void> {
     register("neteaseMusic.openMyProfile", () => this.openMyProfile());
     register("neteaseMusic.openSettingsPanel", () => this.openSettings("account"));
     register("neteaseMusic.playlist.open", async (id: number) => this.openPlaylist(Number(id)));
+    register("neteaseMusic.toggleLyrics", async () => {
+      await this.toggleLyrics();
+    });
     register("neteaseMusic.minimize", async () => {
       try {
         await vscode.commands.executeCommand("workbench.action.toggleWindowMaximized");
@@ -2312,7 +3124,7 @@ private async pickPlaybackRate(): Promise<void> {
     register("neteaseMusic.favorite", async () => {
       const track = this.player.current;
       if (!track) return;
-      await this.openFavorite(track.id);
+      await this.openFavorite(track.id, true);
     });
     register("neteaseMusic.mode", async () => {
       const modes = ["order", "shuffle", "repeatOne", "repeat"] as const;
@@ -2325,15 +3137,18 @@ private async pickPlaybackRate(): Promise<void> {
       await this.player.pause();
     });
     register("neteaseMusic.playPause", async () => {
-      await this.ensureAudioHost();
+      if (await this.localListenControl("toggle")) return;
+      if (this.player.state().output.kind === "none") await this.ensureAudioHost();
       await this.player.toggle();
     });
     register("neteaseMusic.next", async () => {
-      await this.ensureAudioHost();
+      if (await this.localListenControl("next")) return;
+      if (this.player.state().output.kind === "none") await this.ensureAudioHost();
       await this.player.next(true);
     });
     register("neteaseMusic.previous", async () => {
-      await this.ensureAudioHost();
+      if (await this.localListenControl("previous")) return;
+      if (this.player.state().output.kind === "none") await this.ensureAudioHost();
       await this.player.previous();
     });
     register("neteaseMusic.volumeUp", () => this.player.setVolume(this.player.state().volume + 0.05));
@@ -2364,7 +3179,7 @@ private async pickPlaybackRate(): Promise<void> {
       this.toast(`开始下载：${track.name}`);
     });
     register("neteaseMusic.openSettings", () =>
-      vscode.commands.executeCommand("workbench.action.openSettings", "@ext:dsh.netease-music"),
+      vscode.commands.executeCommand("workbench.action.openSettings", "@ext:AICis.netease-music-vscode"),
     );
     register("neteaseMusic.openConfigFile", () => vscode.commands.executeCommand("workbench.action.openSettingsJson"));
     register("neteaseMusic.showOutput", () => showLog());
@@ -2549,6 +3364,9 @@ private async pickPlaybackRate(): Promise<void> {
     s.previous.text = "$(chevron-left)";
     s.previous.tooltip = "上一首";
     s.previous.command = "neteaseMusic.previous";
+    s.lyrics.text = "$(comment)";
+    s.lyrics.tooltip = "开启/关闭歌词悬浮窗";
+    s.lyrics.command = "neteaseMusic.toggleLyrics";
     s.like.text = "$(heart)";
     s.like.tooltip = "喜欢当前歌曲";
     s.like.command = "neteaseMusic.like";
@@ -2592,14 +3410,43 @@ private async pickPlaybackRate(): Promise<void> {
     if (this.marqueeTimer) return;
     this.marqueeTimer = setInterval(() => {
       this.marqueeOffset += 1;
-      this.updateStatus();
+      this.updateStatusTitle();
     }, 650);
+  }
+
+  private stopMarquee(): void {
+    if (!this.marqueeTimer) return;
+    clearInterval(this.marqueeTimer);
+    this.marqueeTimer = undefined;
+  }
+
+  private updateStatusTitle(): void {
+    const state = this.player.state();
+    const track = state.track;
+    if (!track) return;
+    const artists = track.artists.map((artist) => artist.name).join(" / ");
+    const full = `${track.name}${artists ? ` 鈥? ${artists}` : ""}`;
+    if (full.length <= 22) {
+      this.stopMarquee();
+      this.status.title.text = `$(music) ${full}`;
+      return;
+    }
+    const cycle = full.length + 3;
+    const offset = this.marqueeOffset % cycle;
+    const padded = `${full}   ${full}`;
+    const label = padded.slice(offset, offset + 22).padEnd(22, "\u3000");
+    this.status.title.text = `$(music) ${label}`;
   }
 
   private updateStatus(): void {
     this.updateSleepStatus();
     const state = this.player.state();
     const track = state.track;
+    const statusKey = track
+      ? [track.id, state.playing, state.loading, Math.round(state.preparing || 0), state.liked, state.mode, state.quality, state.actualQuality, Math.round(state.volume * 100), state.output.label].join("|")
+      : "idle";
+    if (statusKey === this.lastStatusKey) return;
+    this.lastStatusKey = statusKey;
     if (!track) {
       this.status.idle.hide();
       this.status.buffer.hide();
@@ -2648,6 +3495,8 @@ private async pickPlaybackRate(): Promise<void> {
       this.lastTitle = full;
       this.marqueeOffset = 0;
     }
+    if (full.length > 22) this.startMarquee();
+    else this.stopMarquee();
     const window = 22;
     let label = full;
     if (full.length > window) {
@@ -2669,6 +3518,8 @@ private async pickPlaybackRate(): Promise<void> {
     this.status.quality.tooltip = `当前音质：${actual}${downgraded ? `（请求 ${requested}，服务端已降级）` : ""}\n点击切换`;
     this.status.volume.text = `${state.volume <= 0.01 ? "$(mute)" : "$(unmute)"} ${Math.round(state.volume * 100)}%`;
     this.status.volume.tooltip = `音量 ${Math.round(state.volume * 100)}%\n点击调节`;
+    this.status.lyrics.text = "$(comment)";
+    this.status.lyrics.tooltip = this.lyricsOverlay?.active ? "关闭歌词悬浮窗" : "开启歌词悬浮窗";
     this.status.like.text = state.liked ? "$(heart-filled)" : "$(heart)";
     this.status.like.tooltip = state.liked ? "取消喜欢" : "喜欢当前歌曲";
     this.status.mode.text =
@@ -2687,6 +3538,7 @@ private async pickPlaybackRate(): Promise<void> {
     const st = getConfig().status;
     const hasTrack = Boolean(state.track);
     const show = (item: vscode.StatusBarItem, visible: boolean) => (visible ? item.show() : item.hide());
+    show(this.status.lyrics, st.showLyrics && hasTrack);
     show(this.status.buffer, st.showBuffer && hasTrack);
     show(this.status.like, st.showLike && hasTrack);
     show(this.status.favorite, st.showFavorite && hasTrack);
@@ -2742,7 +3594,10 @@ private async pickPlaybackRate(): Promise<void> {
   }
 
   dispose(): void {
+    if (this.listenPoll) clearTimeout(this.listenPoll);
+    if (this.friendPoll) clearInterval(this.friendPoll);
     this.stopQr();
+    this.smtc?.stop();
     if (this.marqueeTimer) clearInterval(this.marqueeTimer);
     if (this.sleepTimer) clearTimeout(this.sleepTimer);
     for (const item of this.statusItems) item.dispose();

@@ -14,6 +14,8 @@ import type {
   Toplist,
   Track,
   UserPage,
+  FriendUser,
+  PrivateMessage,
 } from "./api/types";
 import type { MusicConfig, PlayMode, Quality, QualityOption } from "./config";
 
@@ -89,12 +91,29 @@ export interface SettingsView {
   version: string;
   stats: ResourceStatsView;
   showTitle: boolean;
+  showLyricsButton: boolean;
   showLike: boolean;
   showFavorite: boolean;
   showMode: boolean;
   showNavigation: boolean;
   showBuffer: boolean;
   showQueue: boolean;
+  lyricsEnabled: boolean;
+  lyricsStartOnLaunch: boolean;
+  lyricsFont: string;
+  lyricsSize: number;
+  lyricsColor: string;
+  lyricsOpacity: number;
+  lyricsWidth: number;
+  lyricsHeight: number;
+  lyricsLocked: boolean;
+  lyricsX: number;
+  lyricsY: number;
+  lyricsWeight: number;
+  lyricsFontFile: string;
+  lyricsBorderWidth: number;
+  lyricsBorderColor: string;
+  fonts: string[];
   shortcuts: Record<string, string>;
   quality: Quality;
   downloadQuality: string;
@@ -102,6 +121,7 @@ export interface SettingsView {
   coverDir: string;
   coverFilenameTemplate: string;
   cacheDir: string;
+  cacheLocked: boolean;
   localMusicDir: string;
   componentsDir: string;
   outputMode: string;
@@ -111,12 +131,15 @@ export interface SettingsView {
   sampleFormat: string;
   exclusive: boolean;
   bitPerfect: boolean;
+  persistentSeek: boolean;
+  hrtf: boolean;
   nativeBackend: "wasapi" | "asio";
   bufferMs: number;
   volume: number;
   mode: string;
   backgroundPlay: boolean;
   autoPlay: boolean;
+  startOnLaunch: boolean;
   rememberQueue: boolean;
   themeMode: string;
   compact: boolean;
@@ -161,6 +184,7 @@ export interface NativeStatusView {
   path?: string;
   version?: string;
   backend?: string;
+  backends?: string[];
   reason?: string;
   devices?: Array<{
     id: string;
@@ -254,7 +278,8 @@ export type PageKind =
   | "collections"
   | "local"
   | "cloud"
-  | "now";
+  | "now"
+  | "friends";
 
 export type PageTab = "songs" | "comments" | "subscribers";
 
@@ -287,6 +312,27 @@ export interface PageView {
   cloud?: Track[];
   roam?: Track[];
   following?: ArtistRef[];
+  friends?: FriendsView;
+}
+
+export interface FriendsView {
+  friends: FriendUser[];
+  activeId?: number;
+  messages: PrivateMessage[];
+  loading?: boolean;
+  error?: string;
+}
+
+export interface ListenTogetherView {
+  status: "idle" | "joining" | "connected" | "error";
+  roomId?: string;
+  inviterId?: string;
+  trackId?: number;
+  trackName?: string;
+  artists?: string;
+  position?: number;
+  playing?: boolean;
+  message?: string;
 }
 
 export interface SidebarState {
@@ -304,6 +350,7 @@ export interface SidebarState {
   active: string;
   collapsed: Record<string, boolean>;
   version: string;
+  listen: ListenTogetherView;
 }
 
 export interface SettingsState {
@@ -367,7 +414,11 @@ export type HostMessage =
   | { type: "state"; state: PlayerState }
   | { type: "page"; page: PageView }
   | { type: "lyric"; songId: number; lrc: string; translation: string }
+  | { type: "friendMessages"; activeId: number; messages: PrivateMessage[] }
+  | { type: "spectrum"; bands: number[] }
   | { type: "comments"; view: CommentsView }
+  | { type: "commentReplies"; parentId: number; comments: Comment[]; total: number; more: boolean; error?: string }
+  | { type: "commentLike"; commentId: number; liked: boolean; likedCount: number }
   | { type: "subscribers"; view: SubscribersView }
   | { type: "account"; account: Account | null }
   | { type: "sidebar"; state: SidebarState }
@@ -391,19 +442,26 @@ export type HostMessage =
   | { type: "openLogin" }
   | { type: "switchTab"; tab: string }
   | { type: "favoritePicker"; trackId: number; playlists: PlaylistRef[] }
+  | { type: "toggleFavoritePicker"; trackId: number; playlists: PlaylistRef[] }
   | { type: "playlists"; state: SidebarState };
 
 export type WebviewCommand =
   | "ready"
   | "openDir"
+  | "clearCache"
   | "restartApp"
   | "setSleepTimer"
   | "setPlaybackRate"
   | "nav"
   | "openPlaylist"
   | "openSongDetail"
+  | "followSongDetail"
   | "openSongComments"
+  | "immersive"
   | "postComment"
+  | "loadCommentReplies"
+  | "likeComment"
+  | "replyComment"
   | "openUser"
   | "openMyProfile"
   | "openArtistByName"
@@ -419,6 +477,12 @@ export type WebviewCommand =
   | "deletePlaylist"
   | "movePlaylist"
   | "setVolume"
+  | "openFriends"
+  | "openFriendChat"
+  | "sendFriendMessage"
+  | "copyText"
+  | "joinListen"
+  | "leaveListen"
   | "openMain"
   | "openNow"
   | "openQueue"
@@ -446,6 +510,8 @@ export type WebviewCommand =
   | "choosePlaylistCover"
   | "resetShortcuts"
   | "qrStop"
+  | "chooseFontFile"
+  | "resetLyricsSettings"
   | "qualityPicker"
   | "sleepTimer"
   | "playbackRate"

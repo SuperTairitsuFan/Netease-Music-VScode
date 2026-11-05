@@ -17,6 +17,8 @@ export interface MusicConfig {
     bufferMs: number;
     bitPerfect: boolean;
     backend: "wasapi" | "asio";
+    persistentSeek: boolean;
+    hrtf: boolean;
     streaming: boolean;
   };
   quality: Quality;
@@ -32,8 +34,9 @@ export interface MusicConfig {
   cache: { enabled: boolean; dir: string; maxSizeMB: number };
   localMusic: { dir: string };
   api: { baseUrl: string; timeout: number; userAgent: string; realIP: string; cookie: string };
-  playback: { volume: number; mode: PlayMode; rememberQueue: boolean; autoPlay: boolean; backgroundPlay: boolean };
-  status: { showTitle: boolean; showLike: boolean; showFavorite: boolean; showMode: boolean; showNavigation: boolean; showBuffer: boolean; showQueue: boolean };
+  playback: { volume: number; mode: PlayMode; rememberQueue: boolean; autoPlay: boolean; startOnLaunch: boolean; backgroundPlay: boolean };
+  lyricsOverlay: { enabled: boolean; startOnLaunch: boolean; font: string; size: number; color: string; opacity: number; width: number; height: number; locked: boolean; x: number; y: number; weight: number; fontFile: string; borderWidth: number; borderColor: string };
+  status: { showTitle: boolean; showLyrics: boolean; showLike: boolean; showFavorite: boolean; showMode: boolean; showNavigation: boolean; showBuffer: boolean; showQueue: boolean };
   ui: { theme: string; showLyrics: boolean; panels: Record<string, boolean>; compact: boolean; autoOpen: boolean };
   components: { dir: string; nativeEnginePath: string; verifyHash: boolean; downloadUrl: string; autoDownload: boolean };
 }
@@ -94,6 +97,14 @@ export const QUALITY_OPTIONS: QualityOption[] = [
     levels: ["jyeffect", "hires"],
   },
   {
+    key: "sky",
+    label: "沉浸环绕声",
+    short: "沉浸",
+    tier: "svip",
+    description: "沉浸环绕声 · 5.1 多声道 · 需原生引擎；双声道设备需开启 HRTF 下混 · SVIP",
+    levels: ["sky", "jymaster", "hires"],
+  },
+  {
     key: "jymaster",
     label: "超清母带",
     short: "母带",
@@ -133,7 +144,6 @@ export const SONG_LEVEL_LABELS: Record<string, string> = {
 export function normalizeQuality(value: string | undefined): Quality {
   if (value && QUALITY_ORDER.includes(value as Quality)) return value as Quality;
   if (value === "higher") return "exhigh";
-  if (value === "sky") return "jymaster";
   return "exhigh";
 }
 
@@ -141,15 +151,17 @@ export function getConfig(): MusicConfig {
   const c = vscode.workspace.getConfiguration("neteaseMusic");
   return {
     output: {
-      mode: (c.get<string>("output.mode") ?? "auto") as OutputMode,
+      mode: (c.get<string>("output.mode") ?? "webaudio") as OutputMode,
       device: c.get<string>("output.device") ?? "",
       sampleRate: c.get<string>("output.sampleRate") ?? "auto",
       bitDepth: c.get<string>("output.bitDepth") ?? "auto",
       sampleFormat: c.get<string>("output.sampleFormat") ?? "auto",
-      exclusive: c.get<boolean>("output.exclusive") ?? true,
+      exclusive: c.get<boolean>("output.exclusive") ?? false,
       bufferMs: c.get<number>("output.bufferMs") ?? 10,
       bitPerfect: c.get<boolean>("output.bitPerfect") ?? false,
       backend: c.get<string>("output.backend") === "asio" ? "asio" : "wasapi",
+      persistentSeek: c.get<boolean>("output.persistentSeek") ?? false,
+      hrtf: c.get<boolean>("output.hrtf") ?? false,
       streaming: c.get<boolean>("output.streaming") ?? true,
     },
     quality: normalizeQuality(c.get<string>("quality")),
@@ -184,6 +196,7 @@ export function getConfig(): MusicConfig {
       cookie: c.get<string>("api.cookie") ?? "",
     },
     status: {
+      showLyrics: c.get<boolean>("status.showLyrics") ?? true,
       showTitle: c.get<boolean>("status.showTitle") ?? true,
       showLike: c.get<boolean>("status.showLike") ?? true,
       showFavorite: c.get<boolean>("status.showFavorite") ?? true,
@@ -192,11 +205,29 @@ export function getConfig(): MusicConfig {
       showBuffer: c.get<boolean>("status.showBuffer") ?? true,
       showQueue: c.get<boolean>("status.showQueue") ?? true,
     },
+    lyricsOverlay: {
+      enabled: c.get<boolean>("lyricsOverlay.enabled") ?? false,
+      startOnLaunch: c.get<boolean>("lyricsOverlay.startOnLaunch") ?? true,
+      font: c.get<string>("lyricsOverlay.font") ?? "Microsoft YaHei UI",
+      size: Math.max(16, c.get<number>("lyricsOverlay.size") ?? 30),
+      color: c.get<string>("lyricsOverlay.color") ?? "#ffffff",
+      opacity: Math.max(20, Math.min(100, c.get<number>("lyricsOverlay.opacity") ?? 85)),
+      width: Math.max(400, c.get<number>("lyricsOverlay.width") ?? 900),
+      height: Math.max(100, c.get<number>("lyricsOverlay.height") ?? 220),
+      locked: c.get<boolean>("lyricsOverlay.locked") ?? false,
+      x: c.get<number>("lyricsOverlay.x") ?? -1,
+      y: c.get<number>("lyricsOverlay.y") ?? -1,
+      weight: Math.max(100, Math.min(900, c.get<number>("lyricsOverlay.weight") ?? 600)),
+      fontFile: c.get<string>("lyricsOverlay.fontFile") ?? "",
+      borderWidth: Math.max(0, Math.min(8, c.get<number>("lyricsOverlay.borderWidth") ?? 0)),
+      borderColor: c.get<string>("lyricsOverlay.borderColor") ?? "#ffffff",
+    },
     playback: {
       volume: Math.max(0, Math.min(100, c.get<number>("playback.volume") ?? 80)),
       mode: (c.get<string>("playback.mode") ?? "order") as PlayMode,
       rememberQueue: c.get<boolean>("playback.rememberQueue") ?? true,
       autoPlay: c.get<boolean>("playback.autoPlay") ?? false,
+      startOnLaunch: c.get<boolean>("playback.startOnLaunch") ?? false,
       backgroundPlay: c.get<boolean>("playback.backgroundPlay") ?? true,
     },
     ui: {

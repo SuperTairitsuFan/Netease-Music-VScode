@@ -15,10 +15,10 @@ const SCRIPT_BY_SURFACE: Record<WebviewSurface, string> = {
 };
 
 const TITLE_BY_SURFACE: Record<WebviewSurface, string> = {
-  sidebar: "网易云音乐",
-  main: "网易云音乐",
-  settings: "网易云音乐 · 设置",
-  extras: "网易云音乐 · 扩展组件",
+  sidebar: "网易云音乐（非官方）",
+  main: "网易云音乐（非官方）",
+  settings: "网易云音乐（非官方）· 设置",
+  extras: "网易云音乐（非官方）· 扩展组件",
 };
 
 export function buildHtml(ctx: vscode.ExtensionContext, webview: vscode.Webview, surface: WebviewSurface): string {

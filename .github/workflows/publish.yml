@@ -1,10 +1,10 @@
-name: Publish VS Code Marketplace
+﻿name: Publish VS Code Marketplace
 
 on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Version already present in GitHub Release"
+        description: "Version already present in GitHub Release, e.g. 0.0.164"
         required: true
         default: "0.0.164"
 
@@ -39,10 +39,11 @@ jobs:
         run: |
           set -euo pipefail
           for target in win32-x64 win32-arm64 linux-x64 linux-arm64; do
-            file="vsix/netease-music-${VERSION}-${target}.vsix"
+            file="vsix/netease-music-vscode-${VERSION}-${target}.vsix"
             test -f "$file" || { echo "Missing $file"; exit 1; }
             echo "Publishing $target"
             npx --yes @vscode/vsce@4 publish \
-                --oidc \
-                --packagePath "$file"
+              --oidc \
+              --packagePath "$file"
           done
+

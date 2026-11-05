@@ -61,11 +61,19 @@ export class PlayerService implements vscode.Disposable {
   private readonly likedIds = new Set<number>();
   private recentTracks: Track[] = [];
   private nativeSession?: NativeEngineSession;
+  private nativeEntryPath = "";
+  private nativeFilePath = "";
+  private nativeBackend: "wasapi" | "asio" = "wasapi";
+  private nativeGrowing = false;
+  private nativeDonePath = "";
   private nativeRate = 0;
   private nativeStartPosition = 0;
   private nativeReceivedFrames = 0;
   private nativeExpectedFrames = 0;
   private nativeSongId = 0;
+  private nativeSeeking = false;
+  private nativeLastProgressAt = 0;
+  private nativeEndTimer?: NodeJS.Timeout;
   private nativeWriteChain: Promise<void> = Promise.resolve();
   private nativeBeginChain: Promise<void> = Promise.resolve();
   private nativeBeginToken = 0;
@@ -139,6 +147,37 @@ export class PlayerService implements vscode.Disposable {
 
   isLiked(songId: number): boolean {
     return this.likedIds.has(songId);
+  }
+
+  currentLyricLines(): { current: string; translation: string; next: string } {
+    const payload = this.currentSong ? this.lyricCache.get(this.currentSong.id) : undefined;
+    if (!payload?.lrc) return { current: "", translation: "", next: "" };
+    const parse = (raw: string): Array<{ time: number; text: string }> => {
+      const rows: Array<{ time: number; text: string }> = [];
+      for (const line of raw.split(/\r?\n/)) {
+        const match = /^\[(\d+):(\d+(?:\.\d+)?)\](.*)$/.exec(line.trim());
+        if (!match) continue;
+        const text = match[3].replace(/\[[^\]]+\]/g, "").trim();
+        if (!text) continue;
+        rows.push({ time: Number(match[1]) * 60 + Number(match[2]), text });
+      }
+      rows.sort((a, b) => a.time - b.time);
+      return rows;
+    };
+    const lines = parse(payload.lrc);
+    if (!lines.length) return { current: "", translation: "", next: "" };
+    const translations = parse(payload.translation ?? "");
+    let index = -1;
+    for (let i = 0; i < lines.length; i += 1) {
+      if (lines[i].time <= this.position + 0.25) index = i;
+      else break;
+    }
+    if (index < 0) return { current: "", translation: "", next: lines[0].text };
+    const current = lines[index];
+    const byTime = translations.find((row) => Math.abs(row.time - current.time) < 1.5)?.text ?? "";
+    const byIndex = translations[Math.min(index, translations.length - 1)]?.text ?? "";
+    const translated = byTime || byIndex;
+    return { current: current.text, translation: translated, next: lines[index + 1]?.text ?? "" };
   }
 
   lyricText(): string {
@@ -232,7 +271,11 @@ export class PlayerService implements vscode.Disposable {
           this.duration = this.currentSong ? this.currentSong.duration / 1000 : 0;
           this.post({ type: "queue", tracks: this.queue, index: this.index, sources: this.queueSources });
           this.emit();
-          if (cfg.playback.autoPlay && this.currentSong) void this.start(this.currentSong, 0);
+          if (cfg.playback.startOnLaunch) {
+            void this.start(this.currentSong, 0);
+          } else {
+            void this.preloadCurrent();
+          }
         }
       } catch (err) {
         log.warn("failed to restore queue", String(err));
@@ -240,7 +283,26 @@ export class PlayerService implements vscode.Disposable {
     }
   }
 
+  private async preloadCurrent(): Promise<void> {
+    const song = this.currentSong;
+    if (!song) return;
+    try {
+      const resolved = await this.resolveUrl(song);
+      if (!resolved.url) return;
+      await this.ensureAudioFile(song, resolved, this.playToken, true);
+      log.info("startup preloaded current track without playing", { id: song.id });
+    } catch (err) {
+      log.warn("startup preload failed", String(err));
+    }
+  }
+
   // ------------------------------------------------------------- output
+
+  /** Stop the native process immediately so WASAPI Exclusive is released. */
+  async releaseNativeOutput(): Promise<void> {
+    if (this.nativeSession) await this.stopNative();
+    this.emit();
+  }
 
   async refreshOutput(): Promise<void> {
     const cfg = this.getConfig();
@@ -455,13 +517,22 @@ export class PlayerService implements vscode.Disposable {
     }
   }
 
-  async toggleLike(songId: number): Promise<boolean> {    if (!this.session.loggedIn) throw new Error("请先登录后再收藏");
+  async toggleLike(songId: number): Promise<boolean> {
+    if (!this.session.loggedIn) throw new Error("请先登录后再收藏");
     const next = !this.likedIds.has(songId);
-    await this.session.client.like(songId, next);
     if (next) this.likedIds.add(songId);
     else this.likedIds.delete(songId);
     this.persistLiked();
     this.emit();
+    try {
+      await this.session.client.like(songId, next);
+    } catch (err) {
+      if (next) this.likedIds.delete(songId);
+      else this.likedIds.add(songId);
+      this.persistLiked();
+      this.emit();
+      throw err;
+    }
     return next;
   }
 
@@ -505,6 +576,12 @@ export class PlayerService implements vscode.Disposable {
     this.emit();
   }
 
+  async resume(): Promise<void> {
+    if (this.playing) return;
+    if (!this.currentSong) return;
+    await this.start(this.currentSong, this.position || 0);
+  }
+
   async pause(): Promise<void> {
     this.playing = false;
     this.post({ type: "control", action: "pause" });
@@ -528,17 +605,63 @@ export class PlayerService implements vscode.Disposable {
     const target = Math.max(0, Math.min(seconds, this.duration || seconds));
     this.position = target;
     if (this.nativeSession) {
-      // Seeking inside a still-downloading stream needs the bytes at the target.
-      // Wait for the download to finish (UI shows preparing %) instead of
-      // starting a second download that would delete the growing file.
+      // The first play may still be growing the file even though the download
+      // has already finished. Finalize it before seeking so the persistent
+      // native process can seek inside a complete file.
       if (this.growing) {
         this.loading = true;
         this.emit();
-        const done = await fs.readFile(this.growing.donePath, "utf8").catch(() => "");
+        const g = this.growing;
+        const done = await fs.readFile(g.donePath, "utf8").catch(() => "");
         if (done.trim() === "done") {
-          this.finalizeGrowing();
+          await fs.rename(g.partPath, g.finalPath).catch(() => undefined);
+          const finalStat = await fs.stat(g.finalPath).catch(() => null);
+          this.nativeFilePath = finalStat?.isFile() ? g.finalPath : g.partPath;
+          this.nativeGrowing = false;
+          this.growing = undefined;
+          this.loading = false;
         } else {
           this.keepGrowing = true;
+        }
+      }
+      if (this.getConfig().output.persistentSeek && this.nativeFilePath) {
+        this.position = target;
+        this.nativeStartPosition = target;
+        this.nativeReceivedFrames = 0;
+        this.nativeExpectedFrames = 0;
+        this.nativeSeeking = true;
+        let seeked = true;
+        try {
+          await this.nativeSession.seek(target * 1000);
+        } catch (err) {
+          seeked = false;
+          log.warn("native persistent seek failed", String(err));
+        } finally {
+          this.nativeSeeking = false;
+        }
+        if (!seeked) {
+          await this.stopNative();
+          if (this.nativeFilePath && this.nativeEntryPath) {
+            try {
+              await this.startStreamNative(this.nativeEntryPath, this.nativeFilePath, this.nativeBackend, target, false, "");
+              this.emit();
+              return;
+            } catch (err) {
+              log.warn("native seek restart failed", String(err));
+            }
+          }
+          await this.startNativePlayback(this.currentSong, target);
+          return;
+        }
+        this.emit();
+        return;
+      }
+      if (this.nativeFilePath && this.nativeEntryPath && !this.nativeGrowing) {
+        try {
+          await this.startStreamNative(this.nativeEntryPath, this.nativeFilePath, this.nativeBackend, target, false, "");
+          return;
+        } catch (err) {
+          log.warn("native seek fast path failed, retrying full start", String(err));
         }
       }
       await this.startNativePlayback(this.currentSong, target);
@@ -589,11 +712,11 @@ export class PlayerService implements vscode.Disposable {
     this.scheduleSave();
   }
 
-  async setQuality(quality: Quality): Promise<void> {
+  async setQuality(quality: Quality, resume = this.playing): Promise<void> {
     await vscode.workspace.getConfiguration("neteaseMusic").update("quality", quality, vscode.ConfigurationTarget.Global);
     this.urlCache.clear();
     this.emit();
-    if (this.currentSong && this.playing) await this.start(this.currentSong, this.position);
+    if (this.currentSong && resume) await this.start(this.currentSong, this.position);
   }
 
   /** Re-resolve and restart the current track (used after output format changes). */
@@ -684,7 +807,6 @@ export class PlayerService implements vscode.Disposable {
     log.info("player start", { id: song.id, name: song.name, local: Boolean(song.localPath), output: this.output.kind, position });
     if (this.output.kind === "none") throw new Error(this.output.detail);
     const token = ++this.playToken;
-    await this.stopNative();
     this.currentSong = song;
     this.duration = song.duration / 1000;
     this.position = position;
@@ -701,6 +823,7 @@ export class PlayerService implements vscode.Disposable {
     this.trialEnd = 0;
     this.recordRecent(song);
     this.emit();
+    await this.stopNative();
 
     if (song.localPath) {
       const localUri = this.resourceUriFn?.(song.localPath) ?? "";
@@ -811,9 +934,6 @@ export class PlayerService implements vscode.Disposable {
           return;
         } catch (err) {
           if (token !== this.playToken) return;
-          if (this.nativeStrict()) {
-            throw new Error(`原生输出准备失败：${(err as Error).message}`);
-          }
           log.warn("native preparation failed, falling back to WebAudio", String(err));
           this.post({
             type: "toast",
@@ -871,9 +991,21 @@ export class PlayerService implements vscode.Disposable {
     if (force) this.urlCache.delete(key);
     const cached = this.urlCache.get(key);
     if (cached && cached.expiresAt > Date.now() && cached.value.url) return cached.value;
-    const value = await this.session.client.songUrl(song.id, cfg.quality);
+    const levels: Array<typeof cfg.quality> = cfg.quality === "sky"
+      ? ["sky", "jymaster", "hires", "lossless", "exhigh"]
+      : [cfg.quality];
+    let value: SongUrlResult | undefined;
+    for (const level of levels) {
+      value = await this.session.client.songUrl(song.id, level);
+      if (value.url) break;
+    }
+    if (!value) throw new Error("无法获取播放地址");
     const ttl = Math.max(30, (value.expi ?? 1200) - 10);
     this.urlCache.set(key, { value, expiresAt: Date.now() + ttl * 1000 });
+    if (this.urlCache.size > 64) {
+      const oldest = this.urlCache.keys().next().value;
+      if (oldest) this.urlCache.delete(oldest);
+    }
     return value;
   }
 
@@ -904,12 +1036,22 @@ export class PlayerService implements vscode.Disposable {
     try {
       const names = await fs.readdir(dir);
       const entries: Array<{ path: string; size: number; at: number }> = [];
+      const now = Date.now();
       for (const name of names) {
-        if (!/\.(flac|mp3)$/i.test(name)) continue;
         const full = path.join(dir, name);
-        if (keep && path.resolve(full) === path.resolve(keep)) continue;
         const stat = await fs.stat(full).catch(() => null);
-        if (stat?.isFile()) entries.push({ path: full, size: stat.size, at: stat.mtimeMs });
+        if (!stat?.isFile()) continue;
+        if (/\.part$/i.test(name)) {
+          // Never delete the part file that is currently being grown.
+          if (keep && path.resolve(full) === path.resolve(keep) + ".part") continue;
+          // An active download can be recent; stale parts are safe to remove.
+          if (now - stat.mtimeMs < 10 * 60 * 1000) continue;
+          await fs.rm(full, { force: true }).catch(() => undefined);
+          continue;
+        }
+        if (!/\.(flac|mp3)$/i.test(name)) continue;
+        if (keep && path.resolve(full) === path.resolve(keep)) continue;
+        entries.push({ path: full, size: stat.size, at: stat.mtimeMs });
       }
       let total = entries.reduce((sum, item) => sum + item.size, 0);
       entries.sort((a, b) => a.at - b.at);
@@ -964,12 +1106,17 @@ export class PlayerService implements vscode.Disposable {
   private async loadLyric(song: Track): Promise<void> {
     try {
       let payload = this.lyricCache.get(song.id);
-      if (!payload) {
+      if (!payload || !payload.translation) {
         payload = await this.session.client.lyric(song.id);
         this.lyricCache.set(song.id, payload);
+        if (this.lyricCache.size > 80) {
+          const oldest = this.lyricCache.keys().next().value;
+          if (oldest !== undefined) this.lyricCache.delete(oldest);
+        }
       }
       if (this.currentSong?.id === song.id) {
         this.post({ type: "lyric", songId: song.id, lrc: payload.lrc, translation: payload.translation });
+        this.emit();
       }
     } catch (err) {
       log.debug("lyric unavailable", String(err));
@@ -994,7 +1141,7 @@ export class PlayerService implements vscode.Disposable {
     const cfg = this.getConfig();
     const exclusive = backend === "asio" ? true : cfg.output.bitPerfect || cfg.output.exclusive;
     const bits = backend === "asio" ? 32 : exclusive ? 32 : 16;
-    const device = backend === "asio" ? "default" : cfg.output.device || "default";
+    const device = backend === "asio" ? (cfg.output.device?.startsWith("asio:") ? cfg.output.device : "default") : (cfg.output.device && !cfg.output.device.startsWith("asio:") ? cfg.output.device : "default");
     const session = await NativeEngineSession.startFile(
       entryPath,
       filePath,
@@ -1002,11 +1149,17 @@ export class PlayerService implements vscode.Disposable {
       position * 1000,
       growing,
       donePath,
-      { exclusive, bits, device },
+      { exclusive, bits, device, hrtf: cfg.output.hrtf },
     );
     this.streamNative = true;
     this.keepGrowing = false;
     this.nativeSession = session;
+    if (!this.getConfig().output.bitPerfect) session.setVolume(this.volume);
+    this.nativeEntryPath = entryPath;
+    this.nativeFilePath = filePath;
+    this.nativeBackend = backend;
+    this.nativeGrowing = growing;
+    this.nativeDonePath = donePath;
     const streamFormat = session.configured?.format;
     this.nativeRate = Number(streamFormat?.sampleRate ?? 0);
     if (streamFormat) {
@@ -1021,14 +1174,24 @@ export class PlayerService implements vscode.Disposable {
     this.nativeSongId = this.currentSong?.id ?? 0;
     this.nativeExpectedFrames = 0;
     this.finishedNative = false;
+    this.nativeLastProgressAt = Date.now();
     this.mediaLoaded = true;
     this.loading = false;
     this.preparing = 100;
     this.playing = true;
     this.position = position;
     this.nativeWriteChain = Promise.resolve();
+    this.armNativeEndWatch(session);
     session.on("log", (line) => log.warn("native stderr", line));
     session.on("engineError", (err: Error) => log.warn("native engine error", err.message));
+    session.on("spectrum", (p: any) => {
+
+      if (this.nativeSession !== session) return;
+
+      if (Array.isArray(p?.bands)) this.post({ type: "spectrum", bands: p.bands.slice(0, 32) });
+
+    });
+
     session.on("progress", (p: any) => {
       if (this.nativeSession !== session) return;
       this.onNativeProgress(p);
@@ -1060,6 +1223,14 @@ export class PlayerService implements vscode.Disposable {
     if (this.growing && this.growing.partPath === partPath) return partPath;
     if (stat?.isFile() && stat.size > 1024) return finalPath;
     if (resolved.type !== "flac") return this.ensureAudioFile(song, resolved, token);
+    const partStat = await fs.stat(partPath).catch(() => null);
+    const priorDone = await fs.readFile(donePath, "utf8").catch(() => "");
+    if (partStat?.isFile() && partStat.size > 1024 && priorDone.trim() === "done") {
+      await fs.rename(partPath, finalPath).catch(() => undefined);
+      const recovered = await fs.stat(finalPath).catch(() => null);
+      if (recovered?.isFile() && recovered.size > 1024) return finalPath;
+      return partPath;
+    }
     await fs.rm(donePath, { force: true }).catch(() => undefined);
     await fs.rm(partPath, { force: true }).catch(() => undefined);
     const promise = downloadToGrowingFile(resolved.url!, partPath, donePath, {
@@ -1074,7 +1245,7 @@ export class PlayerService implements vscode.Disposable {
     this.growing = { finalPath, partPath, donePath, promise };
     for (let i = 0; i < 150; i += 1) {
       const size = await fs.stat(partPath).then((s) => s.size).catch(() => 0);
-      if (size > 256 * 1024) break;
+      if (size > 64 * 1024) break;
       await new Promise((resolve) => setTimeout(resolve, 20));
     }
     const doneState = await fs.readFile(donePath, "utf8").catch(() => "");
@@ -1182,7 +1353,7 @@ export class PlayerService implements vscode.Disposable {
     this.nativeStartPosition = this.position;
     this.finishedNative = false;
     const backend = cfg.output.backend === "asio" ? "asio" : "wasapi";
-    const device = backend === "asio" ? "default" : cfg.output.device || "default";
+    const device = backend === "asio" ? (cfg.output.device?.startsWith("asio:") ? cfg.output.device : "default") : (cfg.output.device && !cfg.output.device.startsWith("asio:") ? cfg.output.device : "default");
     log.info("native configure", { backend, device, rate, bits, sampleFormat, exclusive, bufferMs: Math.max(40, cfg.output.bufferMs), volume: this.volume });
     const options = {
       device,
@@ -1226,8 +1397,22 @@ export class PlayerService implements vscode.Disposable {
       const format: AudioFormat =
         event?.format ?? ({ sampleRate: rate, channels: msg.channels, bits, sampleFormat } as AudioFormat);
       this.nativeRate = format.sampleRate;
-      session.on("progress", (p: any) => this.onNativeProgress(p));
-      session.on("drained", () => void this.finishNative());
+      session.on("spectrum", (p: any) => {
+
+        if (this.nativeSession !== session) return;
+
+        if (Array.isArray(p?.bands)) this.post({ type: "spectrum", bands: p.bands.slice(0, 32) });
+
+      });
+
+      session.on("progress", (p: any) => {
+        if (this.nativeSession !== session) return;
+        this.onNativeProgress(p);
+      });
+      session.on("drained", () => {
+        if (this.nativeSession !== session) return;
+        void this.finishNative();
+      });
       session.on("closed", () => {
         if (this.nativeSession === session) this.nativeSession = undefined;
       });
@@ -1288,7 +1473,9 @@ export class PlayerService implements vscode.Disposable {
     const frames = Number(progress.playedFrames ?? progress.frames ?? 0);
     if (!this.nativeRate) return;
     this.nativeReceivedFrames = frames;
-    this.position = this.nativeStartPosition + frames / this.nativeRate;
+    if (this.nativeSeeking) return;
+    this.nativeLastProgressAt = Date.now();
+    this.position = Math.max(this.position, this.nativeStartPosition + frames / this.nativeRate);
     if (this.duration && this.position > this.duration) this.position = this.duration;
     void this.maybePreloadNext();
     if (this.nativeExpectedFrames && frames >= this.nativeExpectedFrames) {
@@ -1318,7 +1505,25 @@ export class PlayerService implements vscode.Disposable {
     await this.next();
   }
 
+  private armNativeEndWatch(session: NativeEngineSession): void {
+    if (this.nativeEndTimer) clearInterval(this.nativeEndTimer);
+    this.nativeLastProgressAt = Date.now();
+    this.nativeEndTimer = setInterval(() => {
+      if (this.nativeSession !== session || !this.playing || this.nativeSeeking) return;
+      if (this.duration <= 5) return;
+      const remaining = this.duration - this.position;
+      if (remaining <= 10 && Date.now() - this.nativeLastProgressAt >= 8000) {
+        log.warn("native end watchdog", { id: this.nativeSongId, position: this.position, duration: this.duration });
+        void this.finishNative();
+      }
+    }, 2000);
+  }
+
   private async stopNative(): Promise<void> {
+    if (this.nativeEndTimer) {
+      clearInterval(this.nativeEndTimer);
+      this.nativeEndTimer = undefined;
+    }
     if (!this.keepGrowing) this.finalizeGrowing();
     this.streamNative = false;
     const session = this.nativeSession;

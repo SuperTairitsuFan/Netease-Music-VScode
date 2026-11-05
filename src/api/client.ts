@@ -24,6 +24,9 @@ import type {
   ArtistRef,
   Comment,
   DjRadio,
+  FriendUser,
+  ListenTogetherRoomState,
+  PrivateMessage,
   LyricPayload,
   PlaylistDetail,
   PlaylistRef,
@@ -50,6 +53,34 @@ function translateLoginError(err: unknown): unknown {
     if (err.code === 301) return new ApiError("未登录或登录已过期", err.code, err.status, err.body);
   }
   return err;
+}
+
+type InviteScan = { roomId?: string; inviterId?: string; url?: string };
+
+function isListenInviteUrl(url: string): boolean {
+  return /(?:st\.music\.163\.com|music\.163\.com)\/listen-together|roomId=/i.test(url);
+}
+
+
+function scanInvite(value: unknown, out: InviteScan, depth = 0): void {
+  if (depth > 6 || value == null) return;
+  if (typeof value === "string") {
+    const text = value.replace(/\\\//g, "/");
+    const url = /https?:\/\/[^\s"'<>]+/.exec(text);
+    if (url && !out.url && isListenInviteUrl(url[0])) out.url = url[0];
+    const room = /(?:roomId|room_id|roomid)=([^&\s"'<>]+)/i.exec(text);
+    if (room && !out.roomId) out.roomId = decodeURIComponent(room[1]);
+    const inviter = /(?:inviterId|inviter_id|inviter)=(\d+)/i.exec(text);
+    if (inviter && !out.inviterId) out.inviterId = inviter[1];
+    return;
+  }
+  if (typeof value !== "object") return;
+  for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+    if (/^(roomId|room_id|roomid)$/i.test(key) && child != null && !out.roomId) out.roomId = String(child);
+    if (/^(inviterId|inviter_id|inviter)$/i.test(key) && child != null && !out.inviterId) out.inviterId = String(child);
+    if (/^(url|link|jumpUrl|jump_url|webUrl|shareUrl|share_url)$/i.test(key) && typeof child === "string" && !out.url && isListenInviteUrl(child)) out.url = child.replace(/\\\//g, "/");
+    scanInvite(child, out, depth + 1);
+  }
 }
 
 export class NeteaseClient {
@@ -290,6 +321,12 @@ export class NeteaseClient {
       .map((artist: any) => ({ id: Number(artist.id), name: artist.name ?? "" }));
   }
 
+  async songRedCount(id: number): Promise<number> {
+    const data = await this.http.post<{ code: number; data?: { count?: number } }>("/api/song/red/count", { id });
+    requireOk(data, "获取歌曲红心数量");
+    return Number(data.data?.count ?? 0);
+  }
+
   async songDetail(ids: number[]): Promise<Track[]> {
     if (!ids.length) return [];
     const data = await this.http.post<{ code: number; songs?: any[]; privileges?: any[] }>(
@@ -418,6 +455,103 @@ export class NeteaseClient {
     const data = await this.http.post<{ code: number; data?: any[] }>("/api/v1/radio/get", {});
     requireOk(data, "获取漫游歌曲");
     return normalizeTracks(data.data);
+  }
+
+  async friends(limit = 100): Promise<FriendUser[]> {
+    if (!this.isLoggedIn()) return [];
+    const uid = (await this.account())?.userId;
+    if (!uid) return [];
+    const [followingData, followerData] = await Promise.all([
+      this.http.post<{ code: number; follow?: any[]; data?: any[] }>(`/api/user/getfollows/${uid}`, {
+        uid,
+        limit,
+        offset: 0,
+        order: true,
+      }),
+      this.http.post<{ code: number; followeds?: any[]; data?: any[] }>(`/api/user/getfolloweds/${uid}`, {
+        userId: uid,
+        time: 0,
+        limit,
+        offset: 0,
+        getcounts: true,
+      }),
+    ]);
+    const normalize = (raw: any): FriendUser => ({
+      userId: Number(raw.userId ?? raw.id ?? 0),
+      nickname: String(raw.nickname ?? raw.name ?? ""),
+      avatarUrl: String(raw.avatarUrl ?? raw.avatar ?? ""),
+      signature: raw.signature ? String(raw.signature) : undefined,
+    });
+    const following = asArray(followingData.follow ?? followingData.data).map(normalize).filter((item) => item.userId > 0);
+    const followers = new Set(
+      asArray(followerData.followeds ?? followerData.data).map(normalize).map((item) => item.userId),
+    );
+    return following.filter((item) => followers.has(item.userId));
+  }
+
+  async privateConversations(limit = 100): Promise<FriendUser[]> {
+    if (!this.isLoggedIn()) return [];
+    const data = await this.http.post<{ code: number; users?: any[]; data?: any[] }>("/api/msg/private/users", {
+      limit,
+      offset: 0,
+    });
+    return asArray(data.users ?? data.data).map((raw) => {
+      const user = raw.fromUser ?? raw.user ?? raw;
+      return {
+        userId: Number(user.userId ?? user.id ?? 0),
+        nickname: String(user.nickname ?? ""),
+        avatarUrl: String(user.avatarUrl ?? user.avatar ?? ""),
+        signature: user.signature ? String(user.signature) : undefined,
+      };
+    }).filter((item) => item.userId > 0);
+  }
+
+  async privateHistory(uid: number, limit = 100): Promise<PrivateMessage[]> {
+    if (!this.isLoggedIn()) return [];
+    const data = await this.http.post<{ code: number; msgs?: any[]; data?: any[] }>("/api/msg/private/history", {
+      userId: uid,
+      limit,
+      time: 0,
+      total: true,
+    });
+    return asArray(data.msgs ?? data.data).map((raw) => {
+      const invite: InviteScan = {};
+      scanInvite(raw, invite);
+      let content = raw.content || raw.msg || "";
+      if (typeof content !== "string") content = String(content ?? "");
+      for (let depth = 0; depth < 3 && typeof content === "string"; depth += 1) {
+        try {
+          const parsed = JSON.parse(content);
+          if (!parsed || typeof parsed !== "object") break;
+          scanInvite(parsed, invite);
+          content = String(parsed.msg ?? parsed.content ?? "");
+        } catch {
+          break;
+        }
+      }
+      const urlMatch = /https?:\/\/[^\s"'<>]+/.exec(content);
+      if (urlMatch && !invite.url && isListenInviteUrl(urlMatch[0])) invite.url = urlMatch[0];
+      return {
+        id: String(raw.id ?? raw.msgId ?? "msg"),
+        fromUserId: Number(
+          raw.fromUserId ?? raw.fromUser?.userId ?? raw.user?.userId ?? raw.uid ?? raw.userId ?? raw.from ?? 0,
+        ),
+        content,
+        time: Number(raw.time ?? 0),
+        ...(invite.roomId ? { roomId: invite.roomId } : {}),
+        ...(invite.inviterId ? { inviterId: invite.inviterId } : {}),
+        ...(invite.url ? { inviteUrl: invite.url } : {}),
+      };    }).reverse();
+  }
+
+  async sendPrivateMessage(uid: number, content: string): Promise<void> {
+    const data = await this.http.post<{ code: number; message?: string }>("/api/msg/private/send", {
+      userIds: JSON.stringify([uid]),
+      msg: content,
+      type: "text",
+      csrf_token: this.jar.get("__csrf") ?? "",
+    });
+    if (data.code !== 200) throw new Error(data.message || "发送私信失败");
   }
 
   async followedArtists(limit = 50, offset = 0): Promise<ArtistRef[]> {
@@ -649,6 +783,59 @@ export class NeteaseClient {
     requireOk(data, "删除歌单");
   }
 
+  private async listenForm<T>(path: string, form: Record<string, string>): Promise<T> {
+    const csrf = this.jar.get("__csrf") ?? "";
+    const body = new URLSearchParams({ ...form, csrf_token: csrf });
+    const response = await fetch("https://music.163.com" + path + "?csrf_token=" + encodeURIComponent(csrf), {
+      method: "POST",
+      headers: {
+        Cookie: this.http.cookieHeader(),
+        Referer: "https://music.163.com/",
+        "User-Agent": this.http.userAgent,
+        "Content-Type": "application/x-www-form-urlencoded",
+      },
+      body,
+    });
+    if (!response.ok) {
+      const detail = (await response.text()).slice(0, 300);
+      throw new Error(`一起听接口 HTTP ${response.status}${detail ? `：${detail}` : ""}`);
+    }
+    return (await response.json()) as T;
+  }
+
+  async acceptListenTogether(roomId: string, inviterId: string): Promise<void> {
+    const data = await this.listenForm<{ code: number; message?: string }>(
+      "/api/listen/together/play/invitation/accept",
+      { roomId, inviterId },
+    );
+    if (data.code !== 200) throw new Error(data.message || "接受一起听邀请失败");
+  }
+
+  async listenTogetherListCommand(roomId: string, playlistParam: Record<string, unknown>): Promise<void> {
+    const data = await this.listenForm<{ code: number; message?: string; data?: { result?: boolean } }>(
+      "/api/listen/together/sync/list/command/report",
+      { roomId, playlistParam: JSON.stringify(playlistParam) },
+    );
+    if (data.code !== 200 || !data.data?.result) throw new Error(data.message || "一起听列表同步失败");
+  }
+
+  async listenTogetherPlayCommand(roomId: string, command: Record<string, unknown>): Promise<void> {
+    const data = await this.listenForm<{ code: number; message?: string; data?: { result?: boolean } }>(
+      "/api/listen/together/play/command/report",
+      { roomId, commandInfo: JSON.stringify(command) },
+    );
+    if (data.code !== 200 || !data.data?.result) throw new Error(data.message || "一起听播放控制失败");
+  }
+
+  async listenTogetherRoom(roomId: string): Promise<ListenTogetherRoomState> {
+    const data = await this.listenForm<{ code: number; message?: string; data?: ListenTogetherRoomState }>(
+      "/api/listen/together/sync/playlist/get",
+      { roomId },
+    );
+    if (data.code !== 200 || !data.data) throw new Error(data.message || "读取一起听房间失败");
+    return data.data;
+  }
+
   async songUrl(id: number, quality: Quality): Promise<SongUrlResult> {
     const data = await this.http.post<{ code: number; data?: any[] }>("/api/song/enhance/player/url/v1", {
       ids: idsParam([id]),
@@ -682,10 +869,28 @@ export class NeteaseClient {
       romalrc?: { lyric: string };
     }>("/api/song/lyric", { id, lv: -1, kv: -1, tv: -1 });
     requireOk(data, "获取歌词");
+    let translation = data.tlyric?.lyric ?? "";
+    let roma = data.romalrc?.lyric ?? "";
+    if (!translation || !roma) {
+      try {
+        const params = new URLSearchParams({ id: String(id), lv: "-1", kv: "-1", tv: "-1", rv: "-1" });
+        const response = await fetch(`https://music.163.com/api/song/lyric?${params.toString()}`, {
+          headers: { "User-Agent": "Mozilla/5.0" },
+        });
+        const fallback = (await response.json()) as {
+          tlyric?: { lyric?: string };
+          romalrc?: { lyric?: string };
+        };
+        translation = translation || fallback.tlyric?.lyric || "";
+        roma = roma || fallback.romalrc?.lyric || "";
+      } catch {
+        /* keep EAPI result */
+      }
+    }
     return {
       lrc: data.lrc?.lyric ?? "",
-      translation: data.tlyric?.lyric ?? "",
-      roma: data.romalrc?.lyric ?? "",
+      translation,
+      roma,
     };
   }
 
@@ -701,13 +906,31 @@ export class NeteaseClient {
   }
 
   /** Post a comment. `threadId` is e.g. R_SO_4_<songId> or A_PL_0_<playlistId>. */
-  async addComment(threadId: string, content: string): Promise<void> {
+  async commentReplies(resource: string, id: number, parentId: number, limit = 20, offset = 0): Promise<{ comments: Comment[]; total: number }> {
+    const data = await this.http.post<{ code: number; data?: { comments?: any[]; totalCount?: number; hasMore?: boolean } }>(
+      "/api/resource/comment/floor/get",
+      { parentCommentId: parentId, threadId: resource, time: offset ? undefined : -1, limit },
+    );
+    requireOk(data, "获取回复");
+    return { comments: normalizeComments(data.data?.comments), total: Number(data.data?.totalCount ?? 0) };
+  }
+
+  async likeComment(threadId: string, commentId: number, like: boolean): Promise<void> {
+    const data = await this.http.post<{ code: number; message?: string }>(
+      `/api/v1/comment/${like ? "like" : "unlike"}`,
+      { threadId, commentId },
+    );
+    requireOk(data, like ? "点赞评论" : "取消点赞");
+  }
+
+  async addComment(threadId: string, content: string, commentId?: number): Promise<void> {
     const text = content.trim();
     if (!text) throw new Error("评论内容不能为空");
     if (text.length > 140) throw new Error("评论最多 140 个字符");
+    const endpoint = commentId ? "/api/v1/resource/comments/reply" : "/api/v1/resource/comments/add";
     const data = await this.http.post<{ code: number; message?: string; msg?: string }>(
-      "/api/v1/resource/comments/add",
-      { threadId, content: text, csrf_token: this.jar.get("__csrf") ?? "" },
+      endpoint,
+      { threadId, content: text, commentId, csrf_token: this.jar.get("__csrf") ?? "" },
     );
     if (data.code === 301) throw new ApiError("请先登录后再发表评论", 301);
     requireOk(data, "发表评论");

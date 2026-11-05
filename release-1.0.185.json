@@ -1,0 +1,8 @@
+{
+  "tag_name": "v1.0.185",
+  "name": "v1.0.185",
+  "body": "## 网易云音乐 VS Code 扩展 v1.0.185\n\n### 本次变化\n\n- 修复设置页“账号”标签不随配置变化实时刷新的问题，缓存统计、缓存开关与清除结果即时更新。\n- 音频缓存设置整合到账号页，支持页内确认清除、启用开关、容量上限与目录修改。\n- 修复 ASIO seek 后进度条叠加旧位置的问题。\n- 修复进度条拖动时的滑块、填充与时间不同步问题。\n- 状态栏收藏按钮再次点击可关闭收藏到歌单窗口。\n\n### 下载\n\n- Windows x64：`netease-music-1.0.185-win32-x64.vsix`\n- Windows ARM64：`netease-music-1.0.185-win32-arm64.vsix`\n- Linux x64：`netease-music-1.0.185-linux-x64.vsix`\n- Linux ARM64：`netease-music-1.0.185-linux-arm64.vsix`\n",
+  "draft": false,
+  "prerelease": false,
+  "make_latest": "true"
+}

@@ -1,0 +1,8 @@
+{
+  "tag_name": "v1.0.0",
+  "name": "v1.0.0 · 第一版公开构建",
+  "body": "## 网易云音乐 for VS Code（非官方）第一版\n\n> 个人做着玩玩的项目，非官方，与网易云音乐无隶属、授权或合作关系。如果官方提出异议，会立即下架相关文档、仓库、Release 和 Marketplace 插件。\n\n新的 Marketplace 扩展 ID：`AICis.netease-music-vscode`\n\n### 本版内容\n\n- 三块毛玻璃悬浮窗：左侧封面功能、中间歌词、右侧评论\n- 沉浸歌词：封面高斯模糊背景、跟随换歌、Esc 返回\n- 评论点赞、回复、楼层展开、固定输入框、加载更多\n- 原生 WASAPI Shared / Exclusive、ASIO、Linux ALSA\n- 多声道源文件按实际声道输出\n- 沉浸环绕声（5.1）音质；无 sky 时自动回退到超清母带、Hi-Res、无损、极高\n- 双声道 HRTF 空间增强，与 Bit-perfect 互斥\n- 首次启动免责声明确认\n\n### 下载\n\n- Windows x64：`netease-music-vscode-1.0.0-win32-x64.vsix`\n- Windows ARM64：`netease-music-vscode-1.0.0-win32-arm64.vsix`\n- Linux x64：`netease-music-vscode-1.0.0-linux-x64.vsix`\n- Linux ARM64：`netease-music-vscode-1.0.0-linux-arm64.vsix`\n\n这是个人项目，不提供、不托管任何音乐内容。请使用本人合法账号与会员权限。\n",
+  "draft": false,
+  "prerelease": false,
+  "make_latest": "true"
+}

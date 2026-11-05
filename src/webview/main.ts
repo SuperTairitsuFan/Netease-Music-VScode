@@ -17,6 +17,7 @@ import type {
 import { cover, esc, fmtCount, fmtDate, fmtDateTime, fmtTime, QUALITY_TEXT, qs, qsa } from "./dom";
 import { icon } from "./icons";
 import { AudioEngine } from "./audio";
+import { renderFriendMessages } from "./friendsView";
 
 declare function acquireVsCodeApi(): {
   postMessage(message: unknown): void;
@@ -25,13 +26,28 @@ declare function acquireVsCodeApi(): {
 };
 
 const vscode = acquireVsCodeApi();
-const editorAudio = new AudioEngine((msg) => vscode.postMessage(msg));
+const editorAudio = new AudioEngine(
+  (msg) => vscode.postMessage(msg),
+  (bands) => {
+    spectrumBands = bands;
+    drawSpectrum();
+  },
+);
 const send = (cmd: WebviewCommand, payload?: unknown): void => vscode.postMessage({ type: "cmd", cmd, payload });
 
 const app = document.getElementById("app")!;
 const logo = app.dataset.logo ?? "";
 
 let player: PlayerState | null = null;
+let spectrumBands: number[] = [];
+let lastPageKind = "";
+let pendingCoverFade: string | null = null;
+let ambientActive = 0;
+let ambientUrl = "";
+let spectrumPeaks: number[] = [];
+let pendingPlayerState: PlayerState | null = null;
+let playerStateFrame = 0;
+let mainInit: InitState | null = null;
 let account: Account | null = null;
 let queue: Track[] = [];
 let queueSources: Array<PlaybackSource | null> = [];
@@ -53,9 +69,36 @@ let contextTrack: Track | null = null;
 let contextList: Track[] = [];
 let contextIndex = -1;
 let songCommentsOpen = false;
+let immersiveLyrics = false;
+let immersiveSeekPreview: number | null = null;
+let immersiveSeekUntil = 0;
+let immersiveDragging = false;
+let stageSeekPreview: number | null = null;
+let stageSeekUntil = 0;
+let stageDragging = false;
+let friendComposing = false;
 let songPageId = 0;
+let songTab: "detail" | "cover" | "lyrics" | "comments" = "detail";
+let pendingSongTab: "detail" | "cover" | "lyrics" | "comments" | null = null;
+let followSongTab: "detail" | "cover" | "lyrics" | "comments" | null = null;
+const savedImmersiveStyle = (vscode.getState() as { immersiveStyle?: Record<string, unknown> } | undefined)?.immersiveStyle;
+let songLyricFont = typeof savedImmersiveStyle?.font === "string" ? savedImmersiveStyle.font : "Microsoft YaHei UI";
+let songLyricSize = typeof savedImmersiveStyle?.size === "number" ? Math.max(16, Math.min(96, savedImmersiveStyle.size)) : 32;
+let songLyricColor = typeof savedImmersiveStyle?.color === "string" ? savedImmersiveStyle.color : "#ffffff";
+let songLyricWeight = typeof savedImmersiveStyle?.weight === "number" ? savedImmersiveStyle.weight : 600;
+let songLyricOffset = typeof savedImmersiveStyle?.offset === "number" ? savedImmersiveStyle.offset : 0;
+let replyTarget: { id: number; nickname: string } | null = null;
+let commentReplies: Record<number, { open: boolean; loading?: boolean; error?: string; comments: Comment[]; total?: number; more?: boolean }> = {};
 let bpSeekTimer: ReturnType<typeof setTimeout> | undefined;
+let draggingSeek = false;
+let draggingSeekId: "bp-seek" | "now-seek" | "" = "";
+let seekPreviewValue = 0;
+let seekPreviewUntil = 0;
 let queuePopupOpen = false;
+let queueAutoLocateTimer: ReturnType<typeof setTimeout> | undefined;
+let queueAutoLocateBusy = false;
+let queueWasOpen = false;
+let queueAutoBound = false;
 let favoritePicker: { trackId: number; playlists: PlaylistRef[] } | null = null;
 let playlistSort: Array<{ key: "title" | "artist" | "album" | "duration"; dir: 1 | -1 }> = [];
 let playlistLikeOrder: LikeOrder = "none";
@@ -83,13 +126,150 @@ function likeOrderMark(order: LikeOrder): string {
   return order === "first" ? " ↑" : order === "last" ? " ↓" : "";
 }
 
+function setupMediaSession(): void {
+  const session = (navigator as any).mediaSession;
+  if (!session) return;
+  const bind = (action: string, handler: () => void): void => {
+    try { session.setActionHandler(action, handler); } catch { /* unsupported action */ }
+  };
+  bind("play", () => send("playPause"));
+  bind("pause", () => send("playPause"));
+  bind("previoustrack", () => send("previous"));
+  bind("nexttrack", () => send("next"));
+}
+
+function updateMediaSession(): void {
+  const session = (navigator as any).mediaSession;
+  const MediaMetadataCtor = (window as any).MediaMetadata;
+  if (!session || !MediaMetadataCtor) return;
+  const track = player?.track;
+  if (!track) {
+    session.metadata = null;
+    return;
+  }
+  const artists = track.artists.map((artist) => artist.name).join(" / ");
+  const artwork = track.album?.picUrl ? [{ src: cover(track.album.picUrl, 512), sizes: "512x512", type: "image/jpeg" }] : [];
+  try {
+    session.metadata = new MediaMetadataCtor({ title: track.name, artist: artists, album: track.album?.name ?? "", artwork });
+  } catch { /* ignore metadata failures */ }
+  try {
+    if (player?.duration && player.position >= 0 && player.position <= player.duration) {
+      session.setPositionState({ duration: player.duration, position: player.position, playbackRate: 1 });
+    }
+  } catch { /* ignore position failures */ }
+}
+
+function applyPlayerState(next: PlayerState): void {
+  const previous = player;
+  player = next;
+  updateMediaSession();
+  if (player?.likedIds) likedIds = new Set(player.likedIds);
+  const songChanged = (player?.track?.id ?? 0) !== lastTrackId;
+  const likedChanged = Boolean(previous && previous.liked !== player?.liked);
+  if (songChanged) {
+    const oldCover = previous?.track?.album?.picUrl ? cover(previous.track.album.picUrl, 1600) : "";
+    if ((page.kind === "song" || page.kind === "friends") && oldCover) pendingCoverFade = oldCover;
+    updateMainAmbient();
+    lastTrackId = player?.track?.id ?? 0;
+    lyric = { lrc: "", translation: "" };
+    rebuildLyric();
+    if (player?.track) likedIds.add(player.track.id);
+    if (page.kind === "friends") updateFriendsBackground();
+    if (page.kind === "song" && !immersiveLyrics && songTab !== "comments" && player?.track) {
+      followSongTab = songTab;
+      send("followSongDetail", { id: player.track.id });
+    }
+  }
+  if (likedChanged && page.kind === "song" && page.song && player?.track?.id === page.song.track.id) {
+    const current = page.song.track.likedCount ?? 0;
+    page.song.track.likedCount = Math.max(0, current + (player.liked ? 1 : -1));
+  }
+  if (page.kind === "now") {
+    if (songChanged) render();
+    else updateProgress();
+  } else if (page.kind === "song") {
+    if (songChanged || likedChanged || previous?.error !== player?.error) render();
+    else updateProgress();
+  } else if (songChanged) {
+    updateRowHighlights();
+  }
+  renderBottomPlayer();
+  if (previous && previous.liked !== player.liked) {
+    if (player.liked && player.track) likedIds.add(player.track.id);
+    else if (player.track) likedIds.delete(player.track.id);
+    updateRowLikes();
+  }
+}
+
+function drawSpectrum(): void {
+  const canvas = qs<HTMLCanvasElement>("#immersive-spectrum");
+  if (!canvas) return;
+  const dpr = Math.min(2, window.devicePixelRatio || 1);
+  const width = canvas.clientWidth;
+  const height = canvas.clientHeight;
+  if (!width || !height) return;
+  if (canvas.width !== Math.floor(width * dpr) || canvas.height !== Math.floor(height * dpr)) {
+    canvas.width = Math.floor(width * dpr);
+    canvas.height = Math.floor(height * dpr);
+  }
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, width, height);
+  const total = Math.max(24, Math.min(48, spectrumBands.length || 32));
+  const lowBars = Math.ceil(total / 3);
+  const values = Array.from({ length: total }, (_, i) => spectrumBands[Math.min(spectrumBands.length - 1, i)] ?? 0);
+  const mean = values.reduce((sum, value) => sum + value, 0) / values.length;
+  const variance = values.reduce((sum, value) => sum + (value - mean) ** 2, 0) / values.length;
+  const deviation = Math.max(0.012, Math.sqrt(variance));
+  if (spectrumPeaks.length !== total) spectrumPeaks = new Array(total).fill(0);
+  const targets = values.map((value) => {
+    const z = (value - mean) / deviation;
+    return Math.max(0, Math.min(0.9, 0.5 + z * 0.2));
+  });
+  const segments = [
+    { start: 0, count: lowBars, x: 0, width: width / 3 },
+    { start: lowBars, count: Math.max(1, total - lowBars), x: width / 3, width: (width * 2) / 3 },
+  ];
+  const gradient = ctx.createLinearGradient(0, height, 0, 0);
+  gradient.addColorStop(0, "rgba(255,255,255,.55)");
+  gradient.addColorStop(.55, "rgba(255,255,255,.88)");
+  gradient.addColorStop(1, "rgba(255,255,255,1)");
+  ctx.strokeStyle = gradient;
+  ctx.lineWidth = 1;
+  ctx.lineCap = "round";
+  for (const segment of segments) {
+    const stride = segment.width / segment.count;
+    for (let i = 0; i < segment.count; i += 1) {
+      const band = Math.min(total - 1, segment.start + i);
+      const target = targets[band];
+      spectrumPeaks[band] = Math.max(target, (spectrumPeaks[band] ?? 0) - 0.025);
+      const peak = spectrumPeaks[band];
+      const barHeight = Math.max(2, target * height);
+      const peakHeight = Math.max(2, peak * height);
+      const x = segment.x + i * stride + stride / 2;
+      ctx.beginPath();
+      ctx.moveTo(x, height);
+      ctx.lineTo(x, height - barHeight);
+      ctx.stroke();
+      ctx.globalAlpha = 0.7;
+      ctx.beginPath();
+      ctx.moveTo(x - 1.5, height - peakHeight);
+      ctx.lineTo(x + 1.5, height - peakHeight);
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
+  }
+}
+
 function boot(): void {
   app.innerHTML = `<div class="main">
+    <div class="main-ambient" id="main-ambient"><div class="main-ambient-bg is-active"></div><div class="main-ambient-bg"></div><div class="main-ambient-scrim"></div></div>
     <div class="main-top">
       <button class="icon-btn top-back" data-act="back" title="返回上一页">${icon("back", 16)}</button>
       <div class="crumbs">
-        <span>${logo ? `<img src="${esc(logo)}" style="width:15px;height:15px" alt="">` : ""}</span>
-        <span>网易云音乐</span>
+        <span>${logo ? `<img loading="lazy" decoding="async" src="${esc(logo)}" style="width:15px;height:15px" alt="">` : ""}</span>
+        <span>网易云音乐（非官方）</span>
         <span>/</span>
         <span class="current" id="crumb-current">推荐</span>
       </div>
@@ -113,8 +293,30 @@ function boot(): void {
     const query = input.value.trim();
     if (query) send("search", { query, kind: "all" });
   });
+  document.addEventListener("compositionstart", (event) => {
+    if ((event.target as HTMLElement | null)?.id === "friend-message-input") friendComposing = true;
+  }, true);
+  document.addEventListener("compositionend", (event) => {
+    if ((event.target as HTMLElement | null)?.id === "friend-message-input") friendComposing = false;
+  }, true);
   document.addEventListener("keydown", (event) => {
     const target = event.target as HTMLElement | null;
+    if (target?.id === "friend-message-input" && event.key === "Enter") {
+      event.preventDefault();
+      const input = target as HTMLInputElement;
+      const content = input.value.trim();
+      if (content) {
+        input.value = "";
+        input.blur();
+        send("sendFriendMessage", { content });
+      }
+      return;
+    }
+    if (event.key === "Escape" && immersiveLyrics) {
+      event.preventDefault();
+      leaveImmersive();
+      return;
+    }
     if (target?.id === "playlist-search" && event.key === "Enter") {
       playlistQuery = (target as HTMLInputElement).value.trim();
       render();
@@ -374,21 +576,51 @@ function radioCard(item: import("../api/types").DjRadio): string {
   </button>`;
 }
 
+function visitComments(list: Comment[], fn: (comment: Comment) => void): void {
+  for (const comment of list) {
+    fn(comment);
+    const replies = commentReplies[comment.id]?.comments;
+    if (replies?.length) visitComments(replies, fn);
+  }
+}
+
+function commentById(id: number): Comment | null {
+  let found: Comment | null = null;
+  const scan = (list: Comment[]) => visitComments(list, (comment) => { if (comment.id === id) found = comment; });
+  if (comments) { scan(comments.hot); scan(comments.comments); }
+  return found;
+}
+
 function artistCard(item: { id: number; name: string; avatarUrl?: string }): string {
   return `<button class="artist-card" data-act="openArtist" data-id="${item.id}">
-    <img src="${esc(cover(item.avatarUrl, 120))}" alt="">
+    <img loading="lazy" decoding="async" src="${esc(cover(item.avatarUrl, 120))}" alt="">
     <div class="name">${esc(item.name)}</div>
   </button>`;
 }
 
-function commentItem(comment: Comment): string {
-  return `<div class="comment">
-    <img src="${esc(cover(comment.user.avatarUrl, 60))}" alt="" data-act="openUser" data-uid="${comment.user.userId}" title="查看主页">
+function commentItem(comment: Comment, isReply = false): string {
+  const state = commentReplies[comment.id];
+  const count = comment.replyCount ?? (comment.replied ? 1 : 0);
+  const replies = state?.open
+    ? `<div class="comment-replies">
+        ${state.loading ? `<div class="muted tiny">正在加载回复…</div>` : ""}
+        ${state.error ? `<div class="muted tiny">${esc(state.error)}</div>` : ""}
+        ${(state.comments ?? []).map((item) => commentItem(item, true)).join("")}
+        ${state.more ? `<button class="link-btn tiny" data-act="loadCommentReplies" data-id="${comment.id}">加载更多回复</button>` : ""}
+      </div>`
+    : "";
+  return `<div class="comment ${isReply ? "comment-reply" : ""}">
+    <img src="${esc(cover(comment.user.avatarUrl, 60))}" alt="" loading="lazy" decoding="async" data-act="openUser" data-uid="${comment.user.userId}" title="查看主页">
     <div class="body">
       <div class="who"><button class="link-btn" data-act="openUser" data-uid="${comment.user.userId}">${esc(comment.user.nickname)}</button>${comment.user.title ? `<span class="user-title">${esc(comment.user.title)}</span>` : ""}${comment.user.vipType ? `<span class="vip-badge ${comment.user.vipType >= 10 ? "svip" : ""}">${comment.user.vipType >= 10 ? "SVIP" : "VIP"}</span>` : ""}<span class="when">${esc(fmtDateTime(comment.time))}</span></div>
       <div class="text">${esc(comment.content)}</div>
       ${comment.replied ? `<div class="replied"><b>${esc(comment.replied.user.nickname)}：</b>${esc(comment.replied.content)}</div>` : ""}
-      <div class="foot"><span>${icon("heart", 11)} ${comment.likedCount || ""}</span></div>
+      <div class="comment-actions">
+        <button class="comment-action ${comment.liked ? "liked" : ""}" data-act="likeComment" data-id="${comment.id}" data-liked="${comment.liked ? 1 : 0}" data-count="${comment.likedCount}">${icon("heart", 11)} ${comment.likedCount || ""}</button>
+        <button class="comment-action" data-act="replyComment" data-id="${comment.id}" data-name="${esc(comment.user.nickname)}">${icon("comment", 11)} 回复</button>
+        ${!isReply && count ? `<button class="comment-action" data-act="toggleCommentReplies" data-id="${comment.id}">${state?.open ? `收起回复${state?.total ? ` (${state.total})` : ""}` : `查看 ${state?.total ?? count} 条回复`}</button>` : ""}
+      </div>
+      ${replies}
     </div>
   </div>`;
 }
@@ -405,13 +637,39 @@ function empty(message: string): string {
 
 function render(): void {
   const content = qs("#content");
+  const friendInputBefore = qs<HTMLInputElement>("#friend-message-input");
+  const friendValueBefore = friendInputBefore?.value ?? "";
+  const friendFocused = document.activeElement === friendInputBefore;
+  const friendMessagesBefore = qs<HTMLElement>(".friend-messages");
+  const friendScrollBefore = friendMessagesBefore?.scrollTop ?? 0;
+  const friendListBefore = qs<HTMLElement>(".friends-list");
+  const friendListScrollBefore = friendListBefore?.scrollTop ?? 0;
+  const friendNearBottom = friendMessagesBefore
+    ? friendMessagesBefore.scrollTop + friendMessagesBefore.clientHeight >= friendMessagesBefore.scrollHeight - 30
+    : false;
+  const commentListBefore = qs<HTMLElement>(".song-stage-comments-body > .comment-list");
+  const commentScrollBefore = commentListBefore?.scrollTop ?? 0;
   const crumb = qs("#crumb-current");
   if (!content) return;
+  if (immersiveLyrics && page.kind !== "song") {
+    immersiveLyrics = false;
+    send("immersive", { active: false });
+  }
+  const pageChanged = page.kind !== lastPageKind;
   const wasSongPage = document.body.classList.contains("song-page");
-  document.body.classList.toggle("song-page", page.kind === "song");
-  if (page.kind === "song" && !wasSongPage) {
+  document.body.classList.toggle("song-page", page.kind === "song" || page.kind === "friends");
+  document.body.classList.remove("friends-page");
+  document.body.classList.toggle("immersive", immersiveLyrics && page.kind === "song");
+  if (pageChanged || (page.kind === "song" && !wasSongPage)) {
     const main = qs<HTMLElement>(".main");
     if (main) main.scrollTop = 0;
+  }
+  if (pageChanged) {
+    const body = qs<HTMLElement>(".main-body");
+    if (body) {
+      body.classList.add("page-switch");
+      setTimeout(() => body.classList.remove("page-switch"), 220);
+    }
   }
   if (page.kind !== "song") {
     if (lyricManualTimer) {
@@ -448,6 +706,9 @@ function render(): void {
       break;
     case "user":
       content.innerHTML = renderUser();
+      break;
+    case "friends":
+      content.innerHTML = renderFriends();
       break;
     case "album":
       content.innerHTML = renderAlbum();
@@ -492,14 +753,70 @@ function render(): void {
   renderQueuePopup();
   renderFavoritePicker();
   renderCoverPreview();
+  if (pendingCoverFade) {
+    attachCoverFade(pendingCoverFade);
+    pendingCoverFade = null;
+  }
+  if (page.kind === "friends") {
+    updateFriendsBackground();
+    const list = qs<HTMLElement>(".friends-list");
+    if (list) list.scrollTop = friendListScrollBefore;
+    const input = qs<HTMLInputElement>("#friend-message-input");
+    if (input && friendValueBefore) input.value = friendValueBefore;
+    if (input && friendFocused) input.focus();
+    const messages = qs<HTMLElement>(".friend-messages");
+    if (messages) messages.scrollTop = friendNearBottom ? messages.scrollHeight : friendScrollBefore;
+  }
+  lastPageKind = page.kind;
+  updateMainAmbient();
   if (page.kind === "song") updateSongLyricHighlight();
+  updateImmersiveProgress();
+  if (immersiveLyrics && page.kind === "song") requestAnimationFrame(drawSpectrum);
+  updateSongStageProgress();
+  bindSongTabs();
+  bindImmersiveProgress();
+  bindSongStageProgress();
+  const commentListAfter = qs<HTMLElement>(".song-stage-comments-body > .comment-list");
+  if (commentListAfter) commentListAfter.scrollTop = commentScrollBefore;
+}
+
+function switchSongTab(nextTab: "detail" | "cover" | "lyrics" | "comments"): void {
+  if (nextTab !== "comments" && page.song && player?.track && page.song.track.id !== player.track.id) {
+    pendingSongTab = nextTab;
+    send("openSongDetail", { id: player.track.id });
+    return;
+  }
+  songTab = nextTab;
+  const main = qs<HTMLElement>(".main");
+  if (main) main.scrollTop = 0;
+  if (songTab === "comments" && (!comments || comments.loading || comments.error)) {
+    comments = null;
+    send("openSongComments", { id: page.song?.track.id });
+  }
+  try {
+    render();
+  } catch (err) {
+    toast(`页面切换失败：${(err as Error).message}`, "error");
+  }
+}
+
+function bindSongTabs(): void {
+  for (const button of qsa<HTMLElement>('.song-tabs [data-act="songTab"]')) {
+    if (button.dataset.bound === "1") continue;
+    button.dataset.bound = "1";
+    button.addEventListener("click", (event: Event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      switchSongTab((button.dataset.tab as "detail" | "cover" | "lyrics" | "comments") ?? "detail");
+    });
+  }
 }
 
 function renderAccount(): void {
   const chip = qs("#top-account");
   if (!chip) return;
   if (account) {
-    chip.innerHTML = `${account.avatarUrl ? `<img src="${esc(cover(account.avatarUrl, 40))}" alt="">` : ""}<span>${esc(account.nickname)}</span>${account.vipType ? `<span class="vip-badge ${account.vipType >= 10 ? "svip" : ""}">${account.vipType >= 10 ? "SVIP" : "VIP"}</span>` : ""}`;
+    chip.innerHTML = `${account.avatarUrl ? `<img loading="lazy" decoding="async" src="${esc(cover(account.avatarUrl, 40))}" alt="">` : ""}<span>${esc(account.nickname)}</span>${account.vipType ? `<span class="vip-badge ${account.vipType >= 10 ? "svip" : ""}">${account.vipType >= 10 ? "SVIP" : "VIP"}</span>` : ""}`;
     chip.title = "查看我的主页";
     chip.dataset.act = "openMyProfile";
   } else {
@@ -585,7 +902,141 @@ function renderFollowing(): string {
   return `<section class="section"><div class="section-head"><span class="section-title">关注的歌手</span><span class="section-sub">${artists.length} 位</span></div><div class="artist-grid">${artists.map((artist) => artistCard(artist)).join("")}</div></section>`;
 }
 
+function updateImmersiveProgress(): void {
+  const fill = qs<HTMLElement>("#immersive-progress-fill");
+  if (!fill || !player) return;
+  const duration = Math.max(0.1, player.duration || 0);
+  const position = immersiveSeekPreview != null && (immersiveDragging || Date.now() < immersiveSeekUntil)
+    ? immersiveSeekPreview
+    : player.position;
+  const percent = Math.max(0, Math.min(1, position / duration));
+  fill.style.width = `${percent * 100}%`;
+  const time = qs<HTMLElement>("#immersive-progress-time");
+  if (time) time.textContent = `${fmtTime(position)} / ${fmtTime(player.duration || 0)}`;
+}
+
+function bindImmersiveProgress(): void {
+  const bar = qs<HTMLElement>("#immersive-progress");
+  if (!bar) return;
+  const positionFromEvent = (event: PointerEvent): number => {
+    const rect = bar.getBoundingClientRect();
+    const percent = rect.width ? Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width)) : 0;
+    return percent * Math.max(0, player?.duration ?? 0);
+  };
+  bar.addEventListener("pointerdown", (event: PointerEvent) => {
+    if (!player?.duration) return;
+    immersiveDragging = true;
+    immersiveSeekPreview = positionFromEvent(event);
+    immersiveSeekUntil = 0;
+    bar.setPointerCapture(event.pointerId);
+    updateImmersiveProgress();
+  });
+  bar.addEventListener("pointermove", (event: PointerEvent) => {
+    if (!immersiveDragging) return;
+    immersiveSeekPreview = positionFromEvent(event);
+    updateImmersiveProgress();
+  });
+  const finish = (event: PointerEvent) => {
+    if (!immersiveDragging) return;
+    immersiveDragging = false;
+    const value = positionFromEvent(event);
+    immersiveSeekPreview = value;
+    immersiveSeekUntil = Date.now() + 800;
+    send("seek", { value });
+    updateImmersiveProgress();
+  };
+  bar.addEventListener("pointerup", finish);
+  bar.addEventListener("pointercancel", () => {
+    immersiveDragging = false;
+    immersiveSeekPreview = null;
+    immersiveSeekUntil = 0;
+    updateImmersiveProgress();
+  });
+}
+
+function updateSongStageProgress(): void {
+  const fill = qs<HTMLElement>("#song-stage-progress-fill");
+  if (!fill || !player) return;
+  const duration = Math.max(0.1, player.duration || 0);
+  const position = stageSeekPreview != null && (stageDragging || Date.now() < stageSeekUntil)
+    ? stageSeekPreview
+    : player.position;
+  fill.style.width = `${Math.max(0, Math.min(1, position / duration)) * 100}%`;
+}
+
+function bindSongStageProgress(): void {
+  const bar = qs<HTMLElement>("#song-stage-progress");
+  if (!bar) return;
+  const valueAt = (event: PointerEvent): number => {
+    const rect = bar.getBoundingClientRect();
+    const percent = rect.width ? Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width)) : 0;
+    return percent * Math.max(0, player?.duration ?? 0);
+  };
+  bar.addEventListener("pointerdown", (event: PointerEvent) => {
+    if (!player?.duration) return;
+    stageDragging = true;
+    stageSeekPreview = valueAt(event);
+    stageSeekUntil = 0;
+    bar.setPointerCapture(event.pointerId);
+    updateSongStageProgress();
+  });
+  bar.addEventListener("pointermove", (event: PointerEvent) => {
+    if (!stageDragging) return;
+    stageSeekPreview = valueAt(event);
+    updateSongStageProgress();
+  });
+  const finish = (event: PointerEvent) => {
+    if (!stageDragging) return;
+    stageDragging = false;
+    const value = valueAt(event);
+    stageSeekPreview = value;
+    stageSeekUntil = Date.now() + 800;
+    send("seek", { value });
+    updateSongStageProgress();
+  };
+  bar.addEventListener("pointerup", finish);
+  bar.addEventListener("pointercancel", () => {
+    stageDragging = false;
+    stageSeekPreview = null;
+    stageSeekUntil = 0;
+    updateSongStageProgress();
+  });
+}
+
+function renderImmersive(): string {
+  const track = player?.track;
+  if (!track) return empty("还没有正在播放的歌曲");
+  const lines = parseLrc(lyric.lrc);
+  const translations = parseLrc(lyric.translation);
+  const lyricHtml = lines.length
+    ? lines
+        .map((line) => {
+          const translation = translations.find((item) => Math.abs(item.time - line.time) < 0.15);
+          return `<div class="lyric-line" data-act="seekLyric" data-time="${line.time}">${esc(line.text) || "&nbsp;"}${translation ? `<span class="tr">${esc(translation.text)}</span>` : ""}</div>`;
+        })
+        .join("")
+    : `<div class="lyric-line muted">暂无歌词</div>`;
+  const coverUrl = cover(track.album?.picUrl, 1200);
+  return `<div class="immersive-lyrics">
+    <div class="immersive-bg" style="background-image:url('${esc(coverUrl)}')"></div>
+    <div class="immersive-scrim"></div>
+    <div class="immersive-top">
+      <button class="icon-btn immersive-back" data-act="exitImmersive" title="返回歌曲详细">${icon("back", 20)}</button>
+      <div class="immersive-meta"><div class="immersive-title">${esc(track.name)}</div><div class="immersive-artist">${esc(track.artists.map((artist) => artist.name).join(" / "))}</div></div>
+      <div class="immersive-spacer"></div>
+    </div>
+    <div class="immersive-center"><div class="lyric-box immersive-lyric-box" id="immersive-lyrics">${lyricHtml}</div></div>
+    <canvas class="immersive-spectrum" id="immersive-spectrum"></canvas>
+    <div class="immersive-progress" id="immersive-progress" title="点击或拖动跳转"><div class="immersive-progress-time" id="immersive-progress-time"></div><div class="immersive-progress-fill" id="immersive-progress-fill"></div></div>
+  </div>`;
+}
+
+function renderStage(background: string, content: string, extraClass = ""): string {
+  return `<div class="song-stage ${extraClass}"><div class="song-stage-bg" style="background-image:url('${esc(background)}')"></div><div class="song-stage-scrim"></div>${content}</div>`;
+}
+
 function renderSong(): string {
+  if (immersiveLyrics) return renderImmersive();
   if (page.loading) return `<div class="empty"><span class="spinner"></span>正在加载歌曲…</div>`;
   if (page.error) return banner("error", page.error);
   const song = page.song;
@@ -610,7 +1061,7 @@ function renderSong(): string {
     if (player?.track?.id !== track.id) return false;
     let active = -1;
     for (let i = 0; i < lines.length; i += 1) {
-      if (lines[i].time <= (player?.position ?? 0) + 0.15) active = i;
+      if (lines[i].time <= (player?.position ?? 0) + 0.15 + songLyricOffset / 1000) active = i;
       else break;
     }
     return lines[active]?.time === lineTime;
@@ -626,35 +1077,41 @@ function renderSong(): string {
         .join("")
     : `<div class="lyric-line muted">暂无歌词</div>`;
   const left = `<div class="song-left">
-    <img class="now-art song-art" src="${esc(cover(track.album?.picUrl, 520))}" alt="" data-act="zoomCover" data-src="${esc(cover(track.album?.picUrl, 800))}" data-name="${esc(track.name)}" data-artist="${esc(track.artists.map((artist) => artist.name).join(" / "))}" title="点击放大封面">
+    <img loading="lazy" decoding="async" class="now-art song-art" src="${esc(cover(track.album?.picUrl, 520))}" alt="" data-act="zoomCover" data-src="${esc(cover(track.album?.picUrl, 800))}" data-name="${esc(track.name)}" data-artist="${esc(track.artists.map((artist) => artist.name).join(" / "))}" title="点击放大封面">
     <div class="song-info">
       <div class="now-title">${esc(track.name)}</div>
       <div class="song-artists">${artistButtons || esc(track.artists.map((artist) => artist.name).join(" / "))}</div>
       ${composerButtons ? `<div class="song-composers"><span class="muted">作曲</span>${composerButtons}</div>` : ""}
+      ${track.album?.name ? `<div class="song-album"><span class="muted">专辑</span><button class="link-btn" data-act="openAlbum" data-id="${track.album.id}">${esc(track.album.name)}</button></div>` : ""}
       <div class="now-badges">
         <span class="pill accent">${esc(QUALITY_TEXT[player?.actualQuality ?? ""] ?? QUALITY_TEXT[track.privilege?.maxBrLevel ?? ""] ?? "音质")}</span>
-        ${track.album?.name ? `<span class="pill">${esc(track.album.name)}</span>` : ""}
         ${track.duration ? `<span class="pill">${fmtTime(track.duration / 1000)}</span>` : ""}
       </div>
       <div class="now-actions">
-        <button class="btn small ${player?.track?.id === track.id && player.liked ? "primary" : ""}" data-act="likeTrack" data-id="${track.id}">${icon("heart", 12)} ${player?.track?.id === track.id && player.liked ? "已喜欢" : "喜欢"}</button>
+        <button class="btn small ${player?.track?.id === track.id && player.liked ? "primary" : ""}" data-act="likeTrack" data-id="${track.id}">${icon("heart", 12)} ${player?.track?.id === track.id && player.liked ? "已喜欢" : "喜欢"}${track.likedCount ? ` ${fmtCount(track.likedCount)}` : ""}</button>
         <button class="btn small" data-act="playTrack" data-id="${track.id}">${icon("play", 12)} 播放</button>
-        <button class="btn small" data-act="downloadTrack" data-id="${track.id}">${icon("download", 12)} 下载</button>
         <button class="btn small" data-act="openFavorite" data-id="${track.id}">${icon("star", 12)} 收藏</button>
         <button class="btn small" data-act="playNext" data-id="${track.id}">${icon("next", 12)} 下一首播放</button>
+        <button class="btn small" data-act="downloadTrack" data-id="${track.id}">${icon("download", 12)} 下载</button>
+        <button class="btn small immersive-entry" data-act="enterImmersive">${icon("music", 13)} 沉浸歌词</button>
       </div>
-      <button class="comment-entry ${songCommentsOpen ? "active" : ""}" data-act="toggleSongComments">
-        ${icon("comment", 15)} 评论 <b>${commentCount ? fmtCount(commentCount) : ""}</b>
-      </button>
     </div>
     ${player?.error && /采样率|sampleRate/i.test(player.error) ? `<div class="banner warn" style="text-align:left">${esc(player.error)}<div style="margin-top:6px"><button class="btn small primary" data-act="fixSampleRate">改为 auto（跟随音源）</button></div></div>` : ""}
   </div>`;
   const lyricColumn = `<div class="song-lyric-column">
     <div class="lyric-box song-lyrics" id="song-lyric" title="点击或滚轮切换歌词进度">${lyricHtml}</div>
   </div>`;
-  return `<div class="song-split">${left}${lyricColumn}<div class="song-comments" id="song-comments">${renderSongComments(track)}</div></div>`;
+  const background = cover(track.album?.picUrl, 1600);
+  songCommentsOpen = true;
+  return renderStage(background, `<div class="song-stage-grid">
+      <aside class="song-stage-panel song-stage-left">${left}</aside>
+      <section class="song-stage-center">${lyricColumn}</section>
+      <aside class="song-stage-panel song-stage-comments">
+        <div class="song-stage-comments-head"><b>评论</b><span class="song-stage-comment-count">${commentCount ? fmtCount(commentCount) : ""}</span><div><button class="btn small" data-act="refreshSongComments">${icon("refresh", 12)} 刷新</button></div></div>
+        <div class="song-stage-comments-body">${renderSongComments(track)}</div>
+      </aside>
+    </div>`);
 }
-
 function renderSongComments(track: Track): string {
   const count = comments?.total ?? track.commentCount ?? 0;
   if (track.localPath && (track.id <= 0 || !comments)) {
@@ -668,25 +1125,134 @@ function renderSongComments(track: Track): string {
   if (!comments || comments.loading) {
     return `<div class="comment-head"><span class="section-title">评论</span><span class="section-sub">${count ? fmtCount(count) : ""}</span></div><div class="empty"><span class="spinner"></span>正在加载评论…</div>`;
   }
-  if (comments.error) return banner("error", comments.error);
+  if (comments.error) return `${banner("error", comments.error)}<div style="margin-top:8px"><button class="btn small" data-act="retryComments">重新加载评论</button></div>`;
   const hot = comments.hot.length
-    ? `<div class="comment-subhead">精彩评论</div>${comments.hot.map(commentItem).join("")}`
+    ? `<div class="comment-subhead">精彩评论</div>${comments.hot.map((comment) => commentItem(comment)).join("")}`
     : "";
   const list = comments.comments.length
-    ? comments.comments.map(commentItem).join("")
+    ? comments.comments.map((comment) => commentItem(comment)).join("")
     : `<div class="empty">还没有评论，来抢沙发吧</div>`;
   const more = comments.more
-    ? `<div class="comment-more muted tiny">${commentsLoadingMore ? "正在加载更多评论…" : "滚动到此处继续加载评论"}</div>`
+    ? `<button class="comment-more-btn" data-act="loadMoreSongComments">${commentsLoadingMore ? "正在加载更多评论…" : "加载更多评论"}</button>`
     : "";
   const composer = account
     ? `<div class="comment-compose">
-        <textarea id="comment-input" maxlength="140" placeholder="说点什么…" rows="1"></textarea>
+        ${replyTarget ? `<div class="comment-reply-to">回复 @${esc(replyTarget.nickname)} <button class="link-btn" data-act="cancelReply">取消</button></div>` : ""}
+        <textarea id="comment-input" maxlength="140" placeholder="${replyTarget ? `回复 @${esc(replyTarget.nickname)}…` : "说点什么…"}" rows="1"></textarea>
         <button class="send-comment" data-act="sendComment">发送</button>
       </div>`
     : `<div class="comment-compose login-first"><span class="muted">登录后参与评论</span><button class="btn small" data-act="login">登录</button></div>`;
   return `<div class="comment-head"><span class="section-title">评论</span><span class="section-sub">${count ? fmtCount(count) : ""}</span></div>
     ${composer}
     <div class="comment-list">${hot}${comments.comments.length ? `<div class="comment-subhead">最新评论</div>` : ""}${list}${more}</div>`;
+}
+
+function updateMainAmbient(): void {
+  const layers = qsa<HTMLElement>(".main-ambient-bg");
+  if (!layers.length) return;
+  const bg = player?.track?.album?.picUrl ? cover(player.track.album.picUrl, 900) : "";
+  if (bg === ambientUrl) return;
+  ambientUrl = bg;
+  const next = layers[ambientActive ^ 1];
+  const previous = layers[ambientActive];
+  next.style.backgroundImage = bg ? `url('${bg}')` : "none";
+  next.classList.add("is-active");
+  previous.classList.remove("is-active");
+  ambientActive ^= 1;
+  document.body.classList.toggle("has-ambient", Boolean(bg));
+}
+
+function fadeCoverIn(el: HTMLElement | null, opacity: number): void {
+  if (!el) return;
+  el.style.transition = "none";
+  el.style.opacity = "0";
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      el.style.transition = "opacity .65s ease";
+      el.style.opacity = String(opacity);
+    });
+  });
+}
+
+function attachCoverFade(oldCover: string): void {
+  if (!oldCover) return;
+  const stage = qs<HTMLElement>(".song-stage");
+  if (stage) {
+    const current = stage.querySelector<HTMLElement>(".song-stage-bg:not(.song-stage-bg-fade)");
+    if (current) {
+      fadeCoverIn(current, 0.78);
+      const ghost = document.createElement("div");
+      ghost.className = "song-stage-bg song-stage-bg-fade";
+      ghost.style.backgroundImage = `url('${oldCover}')`;
+      current.insertAdjacentElement("afterend", ghost);
+      requestAnimationFrame(() => ghost.classList.add("is-out"));
+      setTimeout(() => ghost.remove(), 750);
+      const art = stage.querySelector<HTMLElement>(".song-art");
+      if (art) {
+        fadeCoverIn(stage.querySelector<HTMLImageElement>(".song-art img"), 1);
+        const artGhost = document.createElement("div");
+        artGhost.className = "song-art-fade";
+        artGhost.style.backgroundImage = `url('${oldCover}')`;
+        art.appendChild(artGhost);
+        requestAnimationFrame(() => artGhost.classList.add("is-out"));
+        setTimeout(() => artGhost.remove(), 750);
+      }
+    }
+  }
+  const immersive = qs<HTMLElement>(".immersive-lyrics");
+  if (immersive) {
+    const current = immersive.querySelector<HTMLElement>(".immersive-bg:not(.immersive-bg-fade)");
+    if (current) {
+      fadeCoverIn(current, 0.62);
+      const ghost = document.createElement("div");
+      ghost.className = "immersive-bg immersive-bg-fade";
+      ghost.style.backgroundImage = `url('${oldCover}')`;
+      current.insertAdjacentElement("afterend", ghost);
+      requestAnimationFrame(() => ghost.classList.add("is-out"));
+      setTimeout(() => ghost.remove(), 750);
+    }
+  }
+}
+function updateFriendsBackground(): void {
+  const el = qs<HTMLElement>(".friends-stage .song-stage-bg");
+  if (!el || page.kind !== "friends") return;
+  const bg = player?.track?.album?.picUrl ? cover(player.track.album.picUrl, 900) : "";
+  el.style.backgroundImage = bg ? `url('${bg}')` : "none";
+}
+
+function renderFriendMessagesFor(messages: Array<{ fromUserId: number; content: string; time: number; roomId?: string; inviterId?: string; inviteUrl?: string }>): string {
+  return renderFriendMessages(messages, {
+    accountId: account?.userId,
+    escapeHtml: esc,
+    emptyHtml: empty,
+    formatTime: fmtDateTime,
+  });
+}
+
+function renderFriends(): string {
+  const view = page.friends;
+  if (page.loading && !view?.friends.length) return '<div class="empty"><span class="spinner"></span>正在加载好友…</div>';
+  if (page.error) return banner("error", page.error);
+  const friends = view?.friends ?? [];
+  const activeId = view?.activeId;
+  const active = friends.find((friend) => friend.userId === activeId);
+  const messages = view?.messages ?? [];
+  const bg = player?.track?.album?.picUrl ? cover(player.track.album.picUrl, 900) : "";
+  const list = friends.length
+    ? friends.map((friend) => `<button class="friend-row ${friend.userId === activeId ? "active" : ""}" data-act="openFriendChat" data-uid="${friend.userId}">
+        <span class="friend-avatar" data-act="openUser" data-uid="${friend.userId}"><img src="${esc(cover(friend.avatarUrl, 80))}" alt="" loading="lazy" decoding="async"></span>
+        <span class="friend-meta"><span class="friend-name">${esc(friend.nickname)}</span><span class="friend-sub">${esc(friend.signature ?? "网易云好友")}</span></span>
+      </button>`).join("")
+    : empty("还没有好友");
+  const chat = active
+    ? `<div class="friend-chat-head"><span class="friend-avatar" data-act="openUser" data-uid="${active.userId}"><img src="${esc(cover(active.avatarUrl, 56))}" alt="" loading="lazy" decoding="async"></span><div><div class="friend-name">${esc(active.nickname)}</div><div class="friend-sub">${esc(active.signature ?? "")}</div></div></div>
+      <div class="friend-messages">${renderFriendMessagesFor(messages)}</div>
+      <div class="friend-composer"><button class="friend-emoji-btn" data-act="toggleFriendEmoji" title="表情">😀</button><input id="friend-message-input" placeholder="发消息…" autocomplete="off" /><div class="friend-emoji-pop" id="friend-emoji-pop" hidden><button data-act="insertFriendEmoji" data-emoji="[微笑]">[微笑]</button><button data-act="insertFriendEmoji" data-emoji="[大笑]">[大笑]</button><button data-act="insertFriendEmoji" data-emoji="[哭]">[哭]</button><button data-act="insertFriendEmoji" data-emoji="[心]">[心]</button><button data-act="insertFriendEmoji" data-emoji="[赞]">[赞]</button><button data-act="insertFriendEmoji" data-emoji="[doge]">[doge]</button><button data-act="insertFriendEmoji" data-emoji="[笑哭]">[笑哭]</button></div><button class="btn primary" data-act="sendFriendMessage">发送</button></div>`
+    : '<div class="friends-empty">选择左侧好友开始聊天</div>';
+  return renderStage(bg, `<div class="song-stage-grid friends-stage-grid">
+    <aside class="song-stage-panel friends-panel"><div class="friends-heading">好友 <span class="muted tiny">${friends.length}</span></div><div class="friends-list">${list}</div></aside>
+    <section class="song-stage-panel friends-chat">${chat}</section>
+  </div>`, "friends-stage");
 }
 
 function renderUser(): string {
@@ -701,7 +1267,7 @@ function renderUser(): string {
     ? `<div class="card-grid">${view.playlists.map(playlistCard).join("")}</div>`
     : empty("还没有公开歌单");
   return `<div class="user-hero">
-    <img class="user-avatar" src="${esc(cover(user.avatarUrl, 240))}" alt="">
+    <img loading="lazy" decoding="async" class="user-avatar" src="${esc(cover(user.avatarUrl, 240))}" alt="">
     <div class="user-info">
       <div class="user-name">${esc(user.nickname)} ${badge} ${user.level ? `<span class="user-level">Lv.${user.level}</span>` : ""}</div>
       <div class="user-meta">
@@ -741,7 +1307,7 @@ function renderBottomPlayer(): void {
       .map((artist) => artist.name)
       .filter((name) => name && !/\{(?:artist|name|album)\}/i.test(name))
       .join(" / ") || "本地音乐";
-  box.innerHTML = `<div class="bp-left" data-act="openSongDetail" data-id="${track.id}" title="打开歌曲详情"><img src="${esc(cover(track.album?.picUrl, 60))}" alt=""><div class="bp-meta"><div class="bp-title">${esc(track.name)}</div><div class="bp-sub">${esc(artistText)}</div></div></div>
+  box.innerHTML = `<div class="bp-left" data-act="openSongDetail" data-id="${track.id}" title="打开歌曲详情"><img loading="lazy" decoding="async" src="${esc(cover(track.album?.picUrl, 60))}" alt=""><div class="bp-meta"><div class="bp-title">${esc(track.name)}</div><div class="bp-sub">${esc(artistText)}</div></div></div>
     <div class="bp-seek-wrap"><span class="bp-time" id="bp-cur">${fmtTime(player.position)}</span><div class="bp-range" id="bp-range"><div class="bp-buffered" id="bp-buffered"></div><div class="bp-played" id="bp-played"></div><input id="bp-seek" type="range" min="0" max="${Math.max(1, player.duration)}" value="${Math.min(player.position, player.duration || player.position)}" step="0.5" aria-label="播放进度" /></div><span class="bp-time" id="bp-dur">${fmtTime(player.duration)}</span></div>`;
   updateModeButton(box);
   updateLikeButton(box);
@@ -799,10 +1365,54 @@ function currentPlaybackSource(): PlaybackSource | null {
   return null;
 }
 
+function locateQueueCurrentNow(flash = false): void {
+  const list = qs<HTMLElement>(".queue-popup-list");
+  const row = qs<HTMLElement>(".queue-row.current");
+  if (!list || !row) return;
+  const listRect = list.getBoundingClientRect();
+  const rowRect = row.getBoundingClientRect();
+  const top = list.scrollTop + rowRect.top - listRect.top - list.clientHeight / 2 + rowRect.height / 2;
+  queueAutoLocateBusy = true;
+  list.scrollTo({ top: Math.max(0, top), behavior: "smooth" });
+  if (flash) {
+    row.classList.add("flash");
+    window.setTimeout(() => row.classList.remove("flash"), 900);
+  }
+  window.setTimeout(() => { queueAutoLocateBusy = false; }, 600);
+}
+
+function scheduleQueueAutoLocate(delay = 10000): void {
+  if (queueAutoLocateTimer) clearTimeout(queueAutoLocateTimer);
+  queueAutoLocateTimer = setTimeout(() => {
+    queueAutoLocateTimer = undefined;
+    locateQueueCurrentNow(false);
+  }, delay);
+}
+
+function bindQueueAutoLocate(): void {
+  const root = qs<HTMLElement>("#queue-popup-root");
+  if (!root) return;
+  if (!queueAutoBound) {
+    queueAutoBound = true;
+    root.addEventListener("scroll", (event) => {
+      const target = event.target as HTMLElement | null;
+      if (!target?.classList?.contains("queue-popup-list")) return;
+      if (queueAutoLocateBusy) return;
+      scheduleQueueAutoLocate();
+    }, true);
+  }
+  locateQueueCurrentNow(false);
+  scheduleQueueAutoLocate();
+}
+
 function renderQueuePopup(): void {
   const root = qs("#queue-popup-root");
+  const opening = queuePopupOpen && !queueWasOpen;
+  queueWasOpen = queuePopupOpen;
   if (!root) return;
   if (!queuePopupOpen) {
+    if (queueAutoLocateTimer) clearTimeout(queueAutoLocateTimer);
+    queueAutoLocateTimer = undefined;
     root.innerHTML = "";
     return;
   }
@@ -815,7 +1425,7 @@ function renderQueuePopup(): void {
           ? queue
               .map(
                 (track, index) => `<div class="queue-row ${track.id === current ? "current" : ""}" data-act="playQueueIndex" data-index="${index}">
-                  <img src="${esc(cover(track.album?.picUrl, 60))}" alt="">
+                  <img loading="lazy" decoding="async" src="${esc(cover(track.album?.picUrl, 60))}" alt="">
                   <div class="queue-meta"><div class="queue-title">${esc(track.name)}</div><div class="queue-sub">${esc(track.artists.map((artist) => artist.name).join(" / "))}</div></div>
                   ${track.id === current && player?.playing ? `<span class="queue-playing">${icon("volume", 12)}</span>` : ""}
                   <button class="icon-btn queue-remove" data-act="removeQueue" data-index="${index}" title="移出队列">${icon("trash", 12)}</button>
@@ -827,6 +1437,9 @@ function renderQueuePopup(): void {
     </div>
     <div class="queue-popup-foot"><button class="btn small" data-act="clearQueue">清空队列</button><span class="muted tiny">点击歌曲播放</span></div>
   </div>`;
+  if (opening) {
+    requestAnimationFrame(() => bindQueueAutoLocate());
+  }
 }
 
 function renderFavoritePicker(): void {
@@ -844,7 +1457,7 @@ function renderFavoritePicker(): void {
       ${items.length ? `<div class="favorite-list">${items
         .map(
           (playlist) => `<button class="favorite-item" data-act="favoriteTo" data-track-id="${trackId}" data-playlist-id="${playlist.id}">
-            <img src="${esc(cover(playlist.coverImgUrl, 80))}" alt="">
+            <img loading="lazy" decoding="async" src="${esc(cover(playlist.coverImgUrl, 80))}" alt="">
             <span class="favorite-meta"><span class="favorite-name">${esc(playlist.name)}</span><span class="favorite-sub">${playlist.trackCount} 首</span></span>
             ${icon("plus", 14)}
           </button>`,
@@ -863,7 +1476,7 @@ function renderCoverPreview(): void {
   }
   root.innerHTML = `<div class="cover-backdrop" data-act="closeCover">
     <div class="cover-modal" data-act="noop">
-      <img src="${esc(coverPreview.url)}" alt="">
+      <img loading="lazy" decoding="async" src="${esc(coverPreview.url)}" alt="">
       <div class="cover-actions">
         <button class="btn primary" data-act="downloadCover">${icon("download", 13)} 下载封面</button>
         <button class="btn" data-act="closeCover">关闭</button>
@@ -888,13 +1501,13 @@ function renderPlaylist(): string {
   const tags = playlist.tags?.length ? `<div class="hero-tags">${playlist.tags.map((tag) => `<span class="tag">${esc(tag)}</span>`).join("")}</div>` : "";
   const hero = `<div class="hero">
     <div class="hero-cover">
-      <img src="${esc(cover(playlist.coverImgUrl, 360))}" alt="">
+      <img loading="lazy" decoding="async" src="${esc(cover(playlist.coverImgUrl, 360))}" alt="">
       <div class="mask">${icon("disc", 46)}</div>
     </div>
     <div class="hero-info">
       <div class="hero-kind">${icon("list", 11)} 歌单</div>
       <h1 class="hero-title">${esc(playlist.name)}</h1>
-      ${playlist.creator ? `<div class="hero-creator"><img src="${esc(cover(playlist.creator.avatarUrl, 40))}" alt="" data-act="openUser" data-uid="${playlist.creator.userId}"><button class="link-btn name" data-act="openUser" data-uid="${playlist.creator.userId}">${esc(playlist.creator.nickname)}</button>${playlist.createTime ? `<span>创建于 ${esc(fmtDate(playlist.createTime))}</span>` : ""}</div>` : ""}
+      ${playlist.creator ? `<div class="hero-creator"><img loading="lazy" decoding="async" src="${esc(cover(playlist.creator.avatarUrl, 40))}" alt="" data-act="openUser" data-uid="${playlist.creator.userId}"><button class="link-btn name" data-act="openUser" data-uid="${playlist.creator.userId}">${esc(playlist.creator.nickname)}</button>${playlist.createTime ? `<span>创建于 ${esc(fmtDate(playlist.createTime))}</span>` : ""}</div>` : ""}
       <div class="hero-meta">
         <span>${playlist.trackCount} 首</span>
         ${playlist.playCount ? `<span>播放 ${fmtCount(playlist.playCount)} 次</span>` : ""}
@@ -1008,10 +1621,10 @@ function renderComments(): string {
   if (!comments || comments.loading) return `<div class="empty"><span class="spinner"></span>正在加载评论…</div>`;
   if (comments.error) return banner("error", comments.error);
   const hot = comments.hot.length
-    ? `<div class="section-head" style="margin-top:14px"><span class="section-title">精彩评论</span></div>${comments.hot.map(commentItem).join("")}`
+    ? `<div class="section-head" style="margin-top:14px"><span class="section-title">精彩评论</span></div>${comments.hot.map((comment) => commentItem(comment)).join("")}`
     : "";
   const list = comments.comments.length
-    ? comments.comments.map(commentItem).join("")
+    ? comments.comments.map((comment) => commentItem(comment)).join("")
     : `<div class="empty">还没有评论，来抢沙发吧</div>`;
   const more = comments.more
     ? `<div class="comment-more muted tiny">${commentsLoadingMore ? "正在加载更多评论…" : "滚动到此处继续加载评论"}</div>`
@@ -1029,7 +1642,7 @@ function renderSubscribers(): string {
   return `<div class="subscribers">${subscribers.subscribers
     .map(
       (subscriber) => `<div class="subscriber">
-        <img src="${esc(cover(subscriber.avatarUrl, 80))}" alt="" data-act="openUser" data-uid="${subscriber.userId}" title="查看主页">
+        <img loading="lazy" decoding="async" src="${esc(cover(subscriber.avatarUrl, 80))}" alt="" data-act="openUser" data-uid="${subscriber.userId}" title="查看主页">
         <div style="min-width:0">
           <button class="link-btn name" data-act="openUser" data-uid="${subscriber.userId}">${esc(subscriber.nickname)}</button>
           <div class="sub">${subscriber.follows !== undefined ? `关注 ${subscriber.follows} · 粉丝 ${subscriber.followeds ?? 0}` : ""}</div>
@@ -1045,7 +1658,7 @@ function renderAlbum(): string {
   const album = page.album;
   if (!album) return empty("专辑不存在");
   return `<div class="hero">
-    <div class="hero-cover"><img src="${esc(cover(album.picUrl, 360))}" alt=""><div class="mask">${icon("disc", 46)}</div></div>
+    <div class="hero-cover"><img loading="lazy" decoding="async" src="${esc(cover(album.picUrl, 360))}" alt=""><div class="mask">${icon("disc", 46)}</div></div>
     <div class="hero-info">
       <div class="hero-kind">${icon("album", 11)} 专辑</div>
       <h1 class="hero-title">${esc(album.name)}</h1>
@@ -1073,7 +1686,7 @@ function renderArtist(): string {
     <button class="page-tab ${artistTab === "similar" ? "active" : ""}" data-act="artistTab" data-tab="similar">相似歌手</button>
   </div>`;
   const hero = `<div class="hero">
-    <div class="hero-cover" style="border-radius:50%;width:150px;height:150px"><img src="${esc(cover(artist.avatarUrl, 320))}" alt=""></div>
+    <div class="hero-cover" style="border-radius:50%;width:150px;height:150px"><img loading="lazy" decoding="async" src="${esc(cover(artist.avatarUrl, 320))}" alt=""></div>
     <div class="hero-info">
       <div class="hero-kind">${icon("mic", 11)} 歌手</div>
       <h1 class="hero-title">${esc(artist.name)}</h1>
@@ -1084,7 +1697,7 @@ function renderArtist(): string {
   </div>`;
   if (artistTab === "albums") {
     const albums = artist.albums ?? [];
-    return `${hero}${tabs}${albums.length ? `<div class="card-grid">${albums.map((album) => `<button class="card" data-act="openAlbum" data-id="${album.id}"><div class="art"><img src="${esc(cover(album.picUrl, 240))}" alt=""></div><div class="name">${esc(album.name)}</div></button>`).join("")}</div>` : empty("暂无专辑")}`;
+    return `${hero}${tabs}${albums.length ? `<div class="card-grid">${albums.map((album) => `<button class="card" data-act="openAlbum" data-id="${album.id}"><div class="art"><img loading="lazy" decoding="async" src="${esc(cover(album.picUrl, 240))}" alt=""></div><div class="name">${esc(album.name)}</div></button>`).join("")}</div>` : empty("暂无专辑")}`;
   }
   if (artistTab === "detail") {
     return `${hero}${tabs}<div class="section-head"><span class="section-title">${esc(artist.name)}简介</span></div><div class="hero-desc" style="font-size:12px;line-height:1.9">${esc(artist.briefDesc || "暂无歌手简介")}</div>`;
@@ -1160,7 +1773,7 @@ function renderSearch(): string {
   }
   if (search.kind === "album") {
     const albums = search.albums ?? [];
-    return `${tabs}${albums.length ? `<div class="card-grid">${albums.map((album) => `<button class="card" data-act="openAlbum" data-id="${album.id}"><div class="art"><img src="${esc(cover(album.picUrl, 240))}" alt=""></div><div class="name">${esc(album.name)}</div></button>`).join("")}</div>` : empty("没有找到专辑")}`;
+    return `${tabs}${albums.length ? `<div class="card-grid">${albums.map((album) => `<button class="card" data-act="openAlbum" data-id="${album.id}"><div class="art"><img loading="lazy" decoding="async" src="${esc(cover(album.picUrl, 240))}" alt=""></div><div class="name">${esc(album.name)}</div></button>`).join("")}</div>` : empty("没有找到专辑")}`;
   }
   if (search.kind === "artist") {
     const artists = search.artists ?? [];
@@ -1168,7 +1781,7 @@ function renderSearch(): string {
   }
   if (search.kind === "user") {
     const users = search.users ?? [];
-    return `${tabs}${users.length ? `<div class="artist-grid">${users.map((user) => `<button class="artist-card" data-act="openUser" data-uid="${user.userId}"><img src="${esc(cover(user.avatarUrl, 120))}" alt=""><div class="name">${esc(user.nickname)}</div></button>`).join("")}</div>` : empty("没有找到用户")}`;
+    return `${tabs}${users.length ? `<div class="artist-grid">${users.map((user) => `<button class="artist-card" data-act="openUser" data-uid="${user.userId}"><img src="${esc(cover(user.avatarUrl, 120))}" alt="" loading="lazy" decoding="async"><div class="name">${esc(user.nickname)}</div></button>`).join("")}</div>` : empty("没有找到用户")}`;
   }
   if (search.kind === "lyric") {
     const lyrics = search.lyrics ?? [];
@@ -1185,7 +1798,7 @@ function renderRadio(): string {
   const programs = page.radioPrograms ?? [];
   return `<div class="radio-detail">
     <div class="radio-info">
-      <img src="${esc(cover(radio.picUrl, 360))}" alt="">
+      <img loading="lazy" decoding="async" src="${esc(cover(radio.picUrl, 360))}" alt="">
       <div class="hero-kind">${icon("radio", 11)} 播客 / 声音</div>
       <h1>${esc(radio.name)}</h1>
       <div class="muted">${esc(radio.dj?.nickname ?? "")}${radio.programCount ? ` · ${radio.programCount} 期` : ""}${radio.subCount ? ` · ${fmtCount(radio.subCount)} 订阅` : ""}</div>
@@ -1350,7 +1963,7 @@ function renderNow(): string {
     : `<div class="lyric-line">暂无歌词</div>`;
   return `<div class="now-page">
     <div class="now-left">
-      <img class="now-art" src="${esc(cover(track.album?.picUrl, 500))}" alt="">
+      <img loading="lazy" decoding="async" class="now-art" src="${esc(cover(track.album?.picUrl, 500))}" alt="">
       <div class="now-title">${esc(track.name)}</div>
       <div class="now-artists">${esc(track.artists.map((artist) => artist.name).join(" / "))}</div>
       <div class="now-badges">${badges}</div>
@@ -1373,6 +1986,14 @@ function renderNow(): string {
 }
 
 // ------------------------------------------------------------- interactions
+
+function leaveImmersive(): void {
+  if (!immersiveLyrics) return;
+  immersiveLyrics = false;
+  send("immersive", { active: false });
+  if (player?.track) send("openSongDetail", { id: player.track.id });
+  render();
+}
 
 function onClick(event: Event): void {
   const target = event.target as HTMLElement | null;
@@ -1420,11 +2041,106 @@ function onClick(event: Event): void {
     case "openSongDetail":
       send("openSongDetail", { id: Number(el.dataset.id) });
       break;
-    case "toggleSongComments":
-      songCommentsOpen = !songCommentsOpen;
-      if (songCommentsOpen) send("openSongComments", { id: page.song?.track.id });
+    case "songTab":
+      const nextTab = (el.dataset.tab as typeof songTab) ?? "detail";
+      if (nextTab !== "comments" && page.song && player?.track && page.song.track.id !== player.track.id) {
+        pendingSongTab = nextTab;
+        send("openSongDetail", { id: player.track.id });
+        return;
+      }
+      songTab = nextTab;
+      const main = qs<HTMLElement>(".main");
+      if (main) main.scrollTop = 0;
+      if (songTab === "comments" && (!comments || comments.loading || comments.error)) {
+        comments = null;
+        send("openSongComments", { id: page.song?.track.id });
+      }
       render();
       break;
+    case "enterImmersive":
+      immersiveLyrics = true;
+      songCommentsOpen = false;
+      send("immersive", { active: true });
+      render();
+      break;
+    case "exitImmersive":
+      leaveImmersive();
+      break;
+    case "toggleSongComments":
+      songCommentsOpen = !songCommentsOpen;
+      if (songCommentsOpen && (!comments || comments.loading || comments.error)) {
+        comments = null;
+        send("openSongComments", { id: page.song?.track.id });
+      }
+      render();
+      break;
+    case "closeSongComments":
+      songCommentsOpen = false;
+      render();
+      break;
+    case "refreshSongComments":
+      comments = null;
+      send("openSongComments", { id: page.song?.track.id });
+      render();
+      break;
+    case "likeComment": {
+      const id = Number(el.dataset.id ?? 0);
+      if (!id) break;
+      send("likeComment", {
+        id: page.song?.track.id ?? 0,
+        resource: page.song ? `R_SO_4_${page.song.track.id}` : "",
+        commentId: id,
+        liked: el.dataset.liked === "1",
+        likedCount: Number(el.dataset.count ?? 0),
+      });
+      break;
+    }
+    case "replyComment": {
+      const id = Number(el.dataset.id ?? 0);
+      if (!id) break;
+      replyTarget = { id, nickname: String(el.dataset.name ?? "用户") };
+      render();
+      setTimeout(() => qs<HTMLTextAreaElement>("#comment-input")?.focus(), 30);
+      break;
+    }
+    case "retryComments":
+      comments = null;
+      send("openSongComments", { id: page.song?.track.id });
+      render();
+      break;
+    case "cancelReply":
+      replyTarget = null;
+      render();
+      break;
+    case "toggleCommentReplies": {
+      const id = Number(el.dataset.id ?? 0);
+      if (!id) break;
+      const state = commentReplies[id];
+      if (state?.open) {
+        state.open = false;
+      } else {
+        commentReplies[id] = { open: true, loading: true, comments: state?.comments ?? [] };
+        send("loadCommentReplies", {
+          id: page.song?.track.id ?? 0,
+          resource: page.song ? `R_SO_4_${page.song.track.id}` : "",
+          parentId: id,
+        });
+      }
+      render();
+      break;
+    }
+    case "loadCommentReplies": {
+      const id = Number(el.dataset.id ?? 0);
+      if (!id) break;
+      commentReplies[id] = { ...(commentReplies[id] ?? { comments: [] }), open: true, loading: true };
+      send("loadCommentReplies", {
+        id: page.song?.track.id ?? 0,
+        resource: page.song ? `R_SO_4_${page.song.track.id}` : "",
+        parentId: id,
+      });
+      render();
+      break;
+    }
     case "sendComment": {
       const input = qs<HTMLTextAreaElement>("#comment-input");
       const content = input?.value.trim() ?? "";
@@ -1432,7 +2148,12 @@ function onClick(event: Event): void {
         toast("请输入评论内容", "error");
         break;
       }
-      send("postComment", { id: page.song?.track.id, content });
+      if (replyTarget) {
+        send("replyComment", { id: page.song?.track.id, parentId: replyTarget.id, content, resource: page.song ? `R_SO_4_${page.song.track.id}` : "" });
+        replyTarget = null;
+      } else {
+        send("postComment", { id: page.song?.track.id, content });
+      }
       break;
     }
     case "loadMoreSongComments":
@@ -1448,6 +2169,48 @@ function onClick(event: Event): void {
     case "openMyProfile":
       send("openMyProfile");
       break;
+    case "openFriendChat":
+      send("openFriendChat", { uid: Number(el.dataset.uid) });
+      break;
+    case "toggleFriendEmoji": {
+      const pop = qs<HTMLElement>("#friend-emoji-pop");
+      if (pop) pop.hidden = !pop.hidden;
+      break;
+    }
+    case "insertFriendEmoji": {
+      const input = qs<HTMLInputElement>("#friend-message-input");
+      const emoji = el.dataset.emoji ?? "";
+      if (input) {
+        const start = input.selectionStart ?? input.value.length;
+        const end = input.selectionEnd ?? start;
+        input.value = input.value.slice(0, start) + emoji + input.value.slice(end);
+        input.focus();
+        input.setSelectionRange(start + emoji.length, start + emoji.length);
+      }
+      const pop = qs<HTMLElement>("#friend-emoji-pop");
+      if (pop) pop.hidden = true;
+      break;
+    }
+    case "copyFriendInvite": {
+      send("copyText", { text: el.dataset.url ?? "" });
+      break;
+    }
+    case "joinListenMessage": {
+      const room = el.dataset.room ?? "";
+      const inviter = el.dataset.inviter ?? "";
+      const url = el.dataset.url ?? "";
+      send("joinListen", { input: room && inviter ? `roomId=${room}&inviterId=${inviter}` : url });
+      break;
+    }
+    case "sendFriendMessage": {
+      const input = qs<HTMLInputElement>("#friend-message-input");
+      const content = input?.value.trim() ?? "";
+      if (content) {
+        if (input) { input.value = ""; input.blur(); }
+        send("sendFriendMessage", { content });
+      }
+      break;
+    }
     case "openUser":
       send("openUser", { uid: Number(el.dataset.uid) });
       break;
@@ -1842,6 +2605,22 @@ function updateRowLikes(): void {
   });
 }
 
+function placeContextMenu(root: HTMLElement, x: number, y: number): void {
+  const menu = root.querySelector<HTMLElement>(".ctx-menu");
+  if (!menu) return;
+  const margin = 8;
+  const width = menu.offsetWidth;
+  const height = menu.offsetHeight;
+  let left = x;
+  if (left + width > window.innerWidth - margin) left = x - width;
+  if (left < margin) left = Math.max(margin, window.innerWidth - width - margin);
+  let top = y;
+  if (top + height > window.innerHeight - margin) top = y - height;
+  if (top < margin) top = Math.max(margin, window.innerHeight - height - margin);
+  menu.style.left = `${left}px`;
+  menu.style.top = `${top}px`;
+}
+
 function showContextMenu(track: Track, x: number, y: number): void {
   const root = qs("#ctx-root");
   if (!root) return;
@@ -1849,7 +2628,7 @@ function showContextMenu(track: Track, x: number, y: number): void {
   const found = listForTrack(track);
   contextList = found.list;
   contextIndex = found.index;
-  root.innerHTML = `<div class="ctx-menu" style="left:${Math.min(x, window.innerWidth - 210)}px;top:${Math.min(y, window.innerHeight - 260)}px">
+  root.innerHTML = `<div class="ctx-menu" style="left:${x}px;top:${y}px">
     <button class="ctx-item" data-act="ctx-play">${icon("play", 12)} 播放</button>
     <button class="ctx-item" data-act="ctx-next">${icon("plus", 12)} 下一首播放</button>
     <button class="ctx-item" data-act="ctx-detail">${icon("comment", 12)} 歌曲详情与评论</button>
@@ -1866,6 +2645,7 @@ function showContextMenu(track: Track, x: number, y: number): void {
     <div class="ctx-sep"></div>
     <button class="ctx-item" data-act="ctx-download">${icon("download", 12)} 下载</button>
   </div>`;
+  placeContextMenu(root, x, y);
 }
 
 function closeContextMenu(): void {
@@ -1878,13 +2658,14 @@ function showPlaylistMenu(id: number, x: number, y: number): void {
   const root = qs("#ctx-root");
   if (!root) return;
   contextTrack = null;
-  root.innerHTML = `<div class="ctx-menu" style="left:${Math.min(x, window.innerWidth - 210)}px;top:${Math.min(y, window.innerHeight - 220)}px">
+  root.innerHTML = `<div class="ctx-menu" style="left:${x}px;top:${y}px">
     <button class="ctx-item" data-act="ctx-subscribe">${icon("star", 12)} 收藏歌单</button>
     <button class="ctx-item" data-act="ctx-copy-link">${icon("external", 12)} 复制歌单链接</button>
     <div class="ctx-sep"></div>
     <button class="ctx-item" data-act="ctx-cover">${icon("image", 12)} 更换封面</button>
     <button class="ctx-item" data-act="ctx-refresh">${icon("refresh", 12)} 刷新歌单</button>
   </div>`;
+  placeContextMenu(root, x, y);
 }
 
 function onContextMenu(event: MouseEvent): void {
@@ -1926,12 +2707,16 @@ function updateLyricHighlight(force = false): void {
 // --------------------------------------------------------------------- state
 
 function applyInit(state: InitState): void {
+  mainInit = state;
   player = state.player;
   account = state.account;
   queue = state.queue ?? [];
   queueSources = state.queueSources ?? [];
   page = state.page;
-  if (page.kind === "song") songPageId = page.song?.track.id ?? 0;
+  if (page.kind === "song") {
+    songPageId = page.song?.track.id ?? 0;
+    songCommentsOpen = true;
+  }
   downloads = state.downloads ?? [];
   lastTrackId = player?.track?.id ?? 0;
   if (player?.likedIds) likedIds = new Set(player.likedIds);
@@ -1939,18 +2724,31 @@ function applyInit(state: InitState): void {
   render();
 }
 
+function seekDisplayPosition(): number {
+  if (!player) return 0;
+  if (draggingSeek) {
+    const input = draggingSeekId ? qs<HTMLInputElement>(`#${draggingSeekId}`) : null;
+    if (input) return Number(input.value) || 0;
+  }
+  if (Date.now() < seekPreviewUntil) return seekPreviewValue;
+  return player.position;
+}
+
 function updateProgress(): void {
   if (!player) return;
   updateBottomProgress();
+  updateImmersiveProgress();
+  updateSongStageProgress();
+  const displayPosition = seekDisplayPosition();
   if (page.kind === "now") {
     const seek = qs<HTMLInputElement>("#now-seek");
     const cur = qs("#now-cur");
     const dur = qs("#now-dur");
-    if (seek && document.activeElement !== seek) {
+    if (seek) {
       seek.max = String(Math.max(1, player.duration));
-      seek.value = String(Math.min(player.position, player.duration || player.position));
+      if (!draggingSeek) seek.value = String(Math.min(displayPosition, player.duration || displayPosition));
     }
-    if (cur) cur.textContent = fmtTime(player.position);
+    if (cur) cur.textContent = fmtTime(displayPosition);
     if (dur) dur.textContent = fmtTime(player.duration);
     updateLyricHighlight();
   } else if (page.kind === "song") {
@@ -1960,14 +2758,15 @@ function updateProgress(): void {
 
 function updateBottomProgress(): void {
   if (!player) return;
+  const displayPosition = seekDisplayPosition();
   const seek = qs<HTMLInputElement>("#bp-seek");
   const cur = qs("#bp-cur");
   const dur = qs("#bp-dur");
-  if (seek && document.activeElement !== seek) {
+  if (seek) {
     seek.max = String(Math.max(1, player.duration));
-    seek.value = String(Math.min(player.position, player.duration || player.position));
+    if (!draggingSeek) seek.value = String(Math.min(displayPosition, player.duration || displayPosition));
   }
-  if (cur) cur.textContent = fmtTime(player.position);
+  if (cur) cur.textContent = fmtTime(displayPosition);
   if (dur) dur.textContent = fmtTime(player.duration);
   const range = qs<HTMLElement>("#bp-range");
   const played = qs<HTMLElement>("#bp-played");
@@ -1975,19 +2774,20 @@ function updateBottomProgress(): void {
   if (!range || !played || !buffered) return;
   const inner = Math.max(1, range.clientWidth - 10);
   const duration = Math.max(0.1, player.duration || 0);
-  const playPct = Math.max(0, Math.min(1, player.position / duration));
+  const playPct = Math.max(0, Math.min(1, displayPosition / duration));
   const bufPct = Math.max(playPct, Math.min(1, (player.buffered ?? 0) / duration));
   played.style.width = `${inner * playPct}px`;
   buffered.style.width = `${inner * bufPct}px`;
 }
 
 function updateSongLyricHighlight(): void {
-  if (page.kind !== "song" || !page.song || !player) return;
-  if (player.track?.id !== page.song.track.id) return;
-  const box = qs<HTMLElement>("#song-lyric") ?? qs<HTMLElement>(".song-detail .lyric-box");
+  if (page.kind !== "song" || !player) return;
+  if (!immersiveLyrics && (!page.song || player.track?.id !== page.song.track.id)) return;
+  const box = qs<HTMLElement>("#immersive-lyrics") ?? qs<HTMLElement>("#song-lyric-full") ?? qs<HTMLElement>("#song-lyric") ?? qs<HTMLElement>(".song-detail .lyric-box");
   if (!box) return;
-  if (songLyricTrackId !== page.song.track.id) {
-    songLyricTrackId = page.song.track.id;
+  const trackId = player.track?.id ?? 0;
+  if (songLyricTrackId !== trackId) {
+    songLyricTrackId = trackId;
     songLyricIndex = -1;
     lyricManualUntil = 0;
     if (lyricManualTimer) {
@@ -1995,10 +2795,11 @@ function updateSongLyricHighlight(): void {
       lyricManualTimer = undefined;
     }
   }
-  const lines = parseLrc(page.song.lyric.lrc);
+  const source = immersiveLyrics ? lyric : page.song?.lyric ?? { lrc: "", translation: "" };
+  const lines = parseLrc(source.lrc);
   let index = -1;
   for (let i = 0; i < lines.length; i += 1) {
-    if (lines[i].time <= player.position + 0.15) index = i;
+    if (lines[i].time <= player.position + 0.15 + songLyricOffset / 1000) index = i;
     else break;
   }
   const nodes = qsa<HTMLElement>(".lyric-line", box);
@@ -2008,7 +2809,6 @@ function updateSongLyricHighlight(): void {
     if (Date.now() >= lyricManualUntil) scrollLyricToIndex(box, index, true);
   }
 }
-
 function scrollLyricToIndex(box: HTMLElement, index: number, smooth: boolean): void {
   if (index < 0) return;
   const nodes = qsa<HTMLElement>(".lyric-line", box);
@@ -2052,10 +2852,21 @@ window.addEventListener("message", (event: MessageEvent<HostMessage>) => {
         if (songPageId !== id) {
           songPageId = id;
           songCommentsOpen = false;
+          songTab = pendingSongTab ?? followSongTab ?? "detail";
+          pendingSongTab = null;
+          followSongTab = null;
+          songCommentsOpen = true;
+          replyTarget = null;
+          commentReplies = {};
           comments = null;
         }
       } else {
         songCommentsOpen = false;
+        songTab = pendingSongTab ?? followSongTab ?? "detail";
+        pendingSongTab = null;
+        followSongTab = null;
+        replyTarget = null;
+        commentReplies = {};
       }
       page = msg.page;
       render();
@@ -2070,34 +2881,17 @@ window.addEventListener("message", (event: MessageEvent<HostMessage>) => {
         });
       }
       break;
-    case "state": {
-      const previous = player;
-      player = msg.state;
-      if (player?.likedIds) likedIds = new Set(player.likedIds);
-      const songChanged = (player?.track?.id ?? 0) !== lastTrackId;
-      if (songChanged) {
-        lastTrackId = player?.track?.id ?? 0;
-        lyric = { lrc: "", translation: "" };
-        rebuildLyric();
-        if (player?.track) likedIds.add(player.track.id);
-      }
-      if (page.kind === "now") {
-        if (songChanged) render();
-        else updateProgress();
-      } else if (page.kind === "song") {
-        if (songChanged || previous?.error !== player?.error) render();
-        else updateProgress();
-      } else if (songChanged) {
-        updateRowHighlights();
-      }
-      renderBottomPlayer();
-      if (previous && previous.liked !== player.liked) {
-        if (player.liked && player.track) likedIds.add(player.track.id);
-        else if (player.track) likedIds.delete(player.track.id);
-        updateRowLikes();
+    case "state":
+      pendingPlayerState = msg.state;
+      if (!playerStateFrame) {
+        playerStateFrame = requestAnimationFrame(() => {
+          playerStateFrame = 0;
+          const next = pendingPlayerState;
+          pendingPlayerState = null;
+          if (next) applyPlayerState(next);
+        });
       }
       break;
-    }
     case "account":
       account = msg.account;
       renderAccount();
@@ -2121,6 +2915,53 @@ window.addEventListener("message", (event: MessageEvent<HostMessage>) => {
       favoritePicker = { trackId: msg.trackId, playlists: msg.playlists };
       renderFavoritePicker();
       break;
+    case "toggleFavoritePicker":
+      favoritePicker =
+        favoritePicker && favoritePicker.trackId === msg.trackId
+          ? null
+          : { trackId: msg.trackId, playlists: msg.playlists };
+      renderFavoritePicker();
+      break;
+    case "commentReplies":
+      commentReplies[msg.parentId] = {
+        open: true,
+        loading: false,
+        error: msg.error,
+        comments: msg.comments,
+        total: msg.total,
+        more: msg.more,
+      };
+      if (page.kind === "song") render();
+      break;
+    case "commentLike":
+      if (comments) {
+        const list = [...comments.hot, ...comments.comments];
+        visitComments(list, (comment) => {
+          if (comment.id !== msg.commentId) return;
+          comment.liked = msg.liked;
+          comment.likedCount = msg.likedCount;
+        });
+        if (page.kind === "song") render();
+      }
+      break;
+    case "spectrum": {
+      spectrumBands = msg.bands;
+      drawSpectrum();
+      break;
+    }
+    case "friendMessages": {
+      if (page.kind === "friends" && page.friends?.activeId === msg.activeId) {
+        const box = qs<HTMLElement>(".friend-messages");
+        const nearBottom = box ? box.scrollTop + box.clientHeight >= box.scrollHeight - 30 : false;
+        const scrollTop = box?.scrollTop ?? 0;
+        page = { ...page, friends: { ...page.friends, messages: msg.messages } };
+        if (box) {
+          box.innerHTML = renderFriendMessagesFor(msg.messages);
+          box.scrollTop = nearBottom ? box.scrollHeight : scrollTop;
+        }
+      }
+      break;
+    }
     case "comments":
       comments = msg.view;
       commentsLoadingMore = false;
@@ -2138,6 +2979,7 @@ window.addEventListener("message", (event: MessageEvent<HostMessage>) => {
       if (msg.songId === player?.track?.id) {
         lyric = { lrc: msg.lrc, translation: msg.translation };
         rebuildLyric();
+        if (immersiveLyrics) render();
         if (page.kind === "now") render();
       }
       break;
@@ -2165,37 +3007,126 @@ window.addEventListener("message", (event: MessageEvent<HostMessage>) => {
   }
 });
 
+document.addEventListener("pointerdown", (event) => {
+  const target = event.target as HTMLInputElement | null;
+  if (target?.id !== "bp-seek" && target?.id !== "now-seek") return;
+  draggingSeek = true;
+  draggingSeekId = target.id;
+  seekPreviewValue = Number(target.value) || 0;
+  seekPreviewUntil = 0;
+});
+
 document.addEventListener("input", (event) => {
   const target = event.target as HTMLInputElement | null;
   if (target?.id === "now-seek" && player) {
     const value = Number(target.value);
     const label = qs("#now-cur");
     if (label) label.textContent = fmtTime(value);
+    seekPreviewValue = value;
+    seekPreviewUntil = draggingSeek ? 0 : Date.now() + 800;
+    if (draggingSeek) updateProgress();
+    else send("seek", { value });
   }
   if (target?.id === "bp-seek" && player) {
     const value = Number(target.value);
     const label = qs("#bp-cur");
     if (label) label.textContent = fmtTime(value);
-    if (bpSeekTimer) clearTimeout(bpSeekTimer);
-    bpSeekTimer = setTimeout(() => send("seek", { value }), 160);
+    seekPreviewValue = value;
+    if (draggingSeek) {
+      seekPreviewUntil = 0;
+      if (bpSeekTimer) clearTimeout(bpSeekTimer);
+      updateBottomProgress();
+    } else {
+      seekPreviewUntil = Date.now() + 800;
+      if (bpSeekTimer) clearTimeout(bpSeekTimer);
+      bpSeekTimer = setTimeout(() => send("seek", { value }), 160);
+    }
   }
 });
 
 document.addEventListener("change", (event) => {
   const target = event.target as HTMLInputElement | null;
-  if (target?.id === "now-seek") send("seek", { value: Number(target.value) });
-  if (target?.id === "bp-seek") {
+  if (target?.id === "now-seek" && !draggingSeek) send("seek", { value: Number(target.value) });
+  if (target?.id === "bp-seek" && !draggingSeek) {
     if (bpSeekTimer) clearTimeout(bpSeekTimer);
     send("seek", { value: Number(target.value) });
   }
 });
 
-document.addEventListener("pointerup", (event) => {
-  const target = event.target as HTMLInputElement | null;
-  if (target?.id === "bp-seek" && player) {
-    if (bpSeekTimer) clearTimeout(bpSeekTimer);
-    send("seek", { value: Number(target.value) });
+document.addEventListener("pointerup", () => {
+  if (!draggingSeek) return;
+  const id = draggingSeekId;
+  const input = id ? qs<HTMLInputElement>(`#${id}`) : null;
+  const value = input ? Number(input.value) : seekPreviewValue;
+  draggingSeek = false;
+  draggingSeekId = "";
+  if (bpSeekTimer) clearTimeout(bpSeekTimer);
+  if (input) {
+    seekPreviewValue = value;
+    seekPreviewUntil = Date.now() + 1000;
+    send("seek", { value });
   }
+  updateProgress();
+});
+
+document.addEventListener("pointercancel", () => {
+  if (!draggingSeek) return;
+  draggingSeek = false;
+  draggingSeekId = "";
+  seekPreviewUntil = 0;
+  updateProgress();
+});
+
+window.addEventListener("blur", () => {
+  if (!draggingSeek) return;
+  draggingSeek = false;
+  draggingSeekId = "";
+  seekPreviewUntil = 0;
+  updateProgress();
+});
+
+function saveImmersiveStyle(): void {
+  const previous = (vscode.getState() as Record<string, unknown> | undefined) ?? {};
+  vscode.setState({
+    ...previous,
+    immersiveStyle: {
+      font: songLyricFont,
+      size: songLyricSize,
+      color: songLyricColor,
+      weight: songLyricWeight,
+      offset: songLyricOffset,
+    },
+  });
+}
+
+function applySongLyricStyle(): void {
+  const page = qs<HTMLElement>("#song-lyrics-page");
+  const box = qs<HTMLElement>("#song-lyric-full");
+  for (const el of [page, box]) {
+    if (!el) continue;
+    el.style.setProperty("--sl-size", `${songLyricSize}px`);
+    el.style.setProperty("--sl-color", songLyricColor);
+    el.style.setProperty("--sl-weight", String(songLyricWeight));
+    if (box) {
+      box.style.fontFamily = `'${songLyricFont}'`;
+      box.style.color = songLyricColor;
+      box.style.fontWeight = String(songLyricWeight);
+    }
+  }
+  updateSongLyricHighlight();
+}
+
+document.addEventListener("input", (event) => {
+  const target = event.target as HTMLInputElement | null;
+  const key = target?.dataset.songLyric;
+  if (!key) return;
+  if (key === "size") songLyricSize = Math.max(16, Math.min(96, Number(target!.value) || 32));
+  if (key === "color") songLyricColor = target!.value || "#ffffff";
+  if (key === "weight") songLyricWeight = Number(target!.value) || 600;
+  if (key === "offset") songLyricOffset = Number(target!.value) || 0;
+  if (key === "font") songLyricFont = target!.value || songLyricFont;
+  saveImmersiveStyle();
+  applySongLyricStyle();
 });
 
 function toast(message: string, kind: "info" | "error" | "success" = "info"): void {
@@ -2210,4 +3141,5 @@ function toast(message: string, kind: "info" | "error" | "success" = "info"): vo
   window.setTimeout(() => item.remove(), 2600);
 }
 
+setupMediaSession();
 boot();

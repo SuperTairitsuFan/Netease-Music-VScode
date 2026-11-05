@@ -1,5 +1,6 @@
 import * as vscode from "vscode";
 import { App } from "./app";
+import { ensureDisclaimer } from "./disclaimer";
 import { initLogger, log } from "./util/logger";
 
 let app: App | undefined;
@@ -11,6 +12,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     platform: process.platform,
     arch: process.arch,
   });
+  if (!(await ensureDisclaimer(context))) return;
   app = new App(context);
   context.subscriptions.push(app);
   try {

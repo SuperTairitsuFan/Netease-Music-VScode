@@ -34,10 +34,16 @@ const NAV_ITEMS: Array<{ key: string; label: string; icon: string; nav: string }
   { key: "podcast", label: "播客", icon: "radio", nav: "podcast" },
   { key: "roam", label: "漫游", icon: "compass", nav: "roam" },
   { key: "following", label: "关注", icon: "users", nav: "following" },
+  { key: "friends", label: "好友", icon: "comment", nav: "friends" },
 ];
 
 function hideQualityPop(): void {
   const pop = qs<HTMLElement>("#quality-pop");
+  if (pop) pop.hidden = true;
+}
+
+function hideListenPop(): void {
+  const pop = qs<HTMLElement>("#listen-pop");
   if (pop) pop.hidden = true;
 }
 
@@ -98,6 +104,7 @@ function boot(): void {
     <div class="sb-footer">
       <button class="icon-btn" data-act="volumePopup" title="音量（双击静音）">${icon("volume", 14)}</button>
       <button class="icon-btn quality-btn" data-act="quality" title="音质调节">${icon("music", 14)}<span id="side-quality">极高</span></button>
+      <button class="icon-btn" data-act="listenTogether" title="一起听">${icon("users", 14)}</button>
       <button class="icon-btn" data-act="sleepTimer" title="定时关闭">${icon("clock", 14)}</button>
       <button class="icon-btn rate-btn" data-act="playbackRate" title="播放速度">1.0x</button>
       
@@ -108,7 +115,15 @@ function boot(): void {
         <button class="quality-option" data-act="setQuality" data-quality="lossless"><span>无损</span><span class="quality-desc">FLAC 16-bit</span></button>
         <button class="quality-option" data-act="setQuality" data-quality="hires"><span>高解析度无损</span><span class="quality-desc">Hi-Res 24-bit</span></button>
         <button class="quality-option" data-act="setQuality" data-quality="jyeffect"><span>高清臻音</span><span class="quality-desc">SVIP 24-bit</span></button>
+        <button class="quality-option" data-act="setQuality" data-quality="sky"><span>沉浸环绕声</span><span class="quality-desc">5.1 多声道</span></button>
         <button class="quality-option" data-act="setQuality" data-quality="jymaster"><span>超清母带</span><span class="quality-desc">SVIP 24-bit</span></button>
+      </div>
+      <div class="sleep-pop listen-pop" id="listen-pop" hidden>
+        <div class="sleep-title">一起听<button class="icon-btn quality-close" data-act="closeListen" title="关闭">×</button></div>
+        <div class="listen-status" id="listen-status">手机端创建官方一起听并邀请你，然后粘贴邀请信息。</div>
+        <input id="listen-invite" class="listen-input" placeholder="官方邀请链接 / roomId inviterId" autocomplete="off" />
+        <div class="sleep-actions"><button class="btn small primary" data-act="joinListen">加入</button><button class="btn small" data-act="leaveListen">退出</button></div>
+        <div class="quality-desc">手机网易云需保持一起听页面活跃。</div>
       </div>
       <div class="sleep-pop" id="sleep-pop" hidden>
         <div class="sleep-title">定时关闭</div>
@@ -229,6 +244,7 @@ function onClick(event: Event): void {
       send("openNow");
       break;
     case "quality": {
+      hideListenPop();
       const volume = qs<HTMLElement>("#volume-pop");
       if (volume) volume.hidden = true;
       hideSleepPop();
@@ -250,7 +266,31 @@ function onClick(event: Event): void {
       send("quality", { quality: el.dataset.quality });
       hideQualityPop();
       break;
+    case "listenTogether": {
+      const pop = qs<HTMLElement>("#listen-pop");
+      if (!pop) break;
+      const volume = qs<HTMLElement>("#volume-pop");
+      if (volume) volume.hidden = true;
+      hideSleepPop(); hideRatePop(); hideQualityPop();
+      pop.hidden = !pop.hidden;
+      break;
+    }
+    case "closeListen": {
+      const pop = qs<HTMLElement>("#listen-pop");
+      if (pop) pop.hidden = true;
+      break;
+    }
+    case "joinListen": {
+      const input = qs<HTMLInputElement>("#listen-invite");
+      send("joinListen", { input: input?.value.trim() ?? "" });
+      break;
+    }
+    case "leaveListen": {
+      send("leaveListen");
+      break;
+    }
     case "sleepTimer": {
+      hideListenPop();
       const volume = qs<HTMLElement>("#volume-pop");
       if (volume) volume.hidden = true;
       hideRatePop();
@@ -276,6 +316,7 @@ function onClick(event: Event): void {
       confirmSleepTimer();
       break;
     case "playbackRate": {
+      hideListenPop();
       if (player?.output?.kind === "native") {
         toast("原生音频输出不支持变速，请切换到 WebAudio", "info");
         break;
@@ -303,6 +344,7 @@ function onClick(event: Event): void {
       confirmRate();
       break;
     case "volumePopup": {
+      hideListenPop();
       const sleep = qs<HTMLElement>("#sleep-pop");
       if (sleep) sleep.hidden = true;
       hideRatePop();
@@ -337,7 +379,32 @@ function onClick(event: Event): void {
   }
 }
 
+function renderListen(): void {
+  const el = qs<HTMLElement>("#listen-status");
+  if (!el) return;
+  const listen = state?.listen;
+  if (!listen || listen.status === "idle") {
+    el.textContent = "手机端创建官方一起听并邀请你，然后粘贴邀请信息。";
+    return;
+  }
+  if (listen.status === "joining") {
+    el.textContent = "正在接受邀请…";
+    return;
+  }
+  if (listen.status === "error") {
+    el.textContent = listen.message ?? "加入失败";
+    return;
+  }
+  const parts = ["已加入一起听"];
+  if (listen.trackName) parts.push(`${listen.trackName}${listen.artists ? ` - ${listen.artists}` : ""}`);
+  if (typeof listen.position === "number") parts.push(`${Math.floor(listen.position / 60)}:${String(Math.floor(listen.position % 60)).padStart(2, "0")} · ${listen.playing ? "播放中" : "暂停"}`);
+  if (listen.roomId) parts.push(`房间 ${listen.roomId}`);
+  if (listen.message) parts.push(listen.message);
+  el.textContent = parts.join("\n");
+}
+
 function render(): void {
+  renderListen();
   const scroll = qs("#sb-scroll");
   if (!scroll || !state) return;
   const panels = state.collapsed ?? {};

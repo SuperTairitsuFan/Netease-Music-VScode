@@ -66,14 +66,23 @@ static void fill_format(WAVEFORMATEXTENSIBLE *wfx, int rate, int channels, int b
   wfx->Format.nAvgBytesPerSec = wfx->Format.nSamplesPerSec * wfx->Format.nBlockAlign;
   wfx->Format.cbSize = sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX);
   wfx->Samples.wValidBitsPerSample = (WORD)bits;
-  wfx->dwChannelMask = channels == 1 ? SPEAKER_FRONT_CENTER
-                                     : channels == 2 ? (SPEAKER_FRONT_LEFT | SPEAKER_FRONT_RIGHT)
-                                                     : 0;
+  switch (channels) {
+    case 1: wfx->dwChannelMask = SPEAKER_FRONT_CENTER; break;
+    case 2: wfx->dwChannelMask = SPEAKER_FRONT_LEFT | SPEAKER_FRONT_RIGHT; break;
+    case 3: wfx->dwChannelMask = SPEAKER_FRONT_LEFT | SPEAKER_FRONT_RIGHT | SPEAKER_FRONT_CENTER; break;
+    case 4: wfx->dwChannelMask = SPEAKER_FRONT_LEFT | SPEAKER_FRONT_RIGHT | SPEAKER_BACK_LEFT | SPEAKER_BACK_RIGHT; break;
+    case 5: wfx->dwChannelMask = SPEAKER_FRONT_LEFT | SPEAKER_FRONT_RIGHT | SPEAKER_FRONT_CENTER | SPEAKER_BACK_LEFT | SPEAKER_BACK_RIGHT; break;
+    case 6: wfx->dwChannelMask = SPEAKER_FRONT_LEFT | SPEAKER_FRONT_RIGHT | SPEAKER_FRONT_CENTER | SPEAKER_LOW_FREQUENCY | SPEAKER_BACK_LEFT | SPEAKER_BACK_RIGHT; break;
+    case 7: wfx->dwChannelMask = SPEAKER_FRONT_LEFT | SPEAKER_FRONT_RIGHT | SPEAKER_FRONT_CENTER | SPEAKER_LOW_FREQUENCY | SPEAKER_BACK_LEFT | SPEAKER_BACK_RIGHT | SPEAKER_BACK_CENTER; break;
+    case 8: wfx->dwChannelMask = SPEAKER_FRONT_LEFT | SPEAKER_FRONT_RIGHT | SPEAKER_FRONT_CENTER | SPEAKER_LOW_FREQUENCY | SPEAKER_BACK_LEFT | SPEAKER_BACK_RIGHT | SPEAKER_SIDE_LEFT | SPEAKER_SIDE_RIGHT; break;
+    default: wfx->dwChannelMask = 0; break;
+  }
   wfx->SubFormat = KSDATAFORMAT_SUBTYPE_PCM;
 }
 
 static IMMDevice *find_device(IMMDeviceEnumerator *enumerator, const char *id, int *is_default) {
   if (is_default) *is_default = 0;
+  if (id && strncmp(id, "asio:", 5) == 0) id = "default";
   if (!id || !*id || strcmp(id, "default") == 0) {
     IMMDevice *device = NULL;
     if (SUCCEEDED(IMMDeviceEnumerator_GetDefaultAudioEndpoint(enumerator, eRender, eConsole, &device))) {
@@ -231,13 +240,39 @@ static int wasapi_open(const NaoeConfig *cfg, NaoeFormat *actual, int *buffer_fr
     goto fail;
   }
   device = find_device(enumerator, cfg->device, &is_default);
+  if (!device && strcmp(cfg->device, "default") != 0) {
+    device = find_device(enumerator, "default", &is_default);
+    if (device) snprintf(cfg->device, sizeof(cfg->device), "default");
+  }
   if (!device) {
     snprintf(err, err_len, "找不到音频设备：%s", cfg->device);
     goto fail;
   }
   if (FAILED(IMMDevice_Activate(device, &IID_IAudioClient, CLSCTX_ALL, NULL, (void **)&client))) {
+    if (!is_default) {
+      IMMDevice_Release(device);
+      device = find_device(enumerator, "default", &is_default);
+      if (device) {
+        snprintf(cfg->device, sizeof(cfg->device), "default");
+        if (SUCCEEDED(IMMDevice_Activate(device, &IID_IAudioClient, CLSCTX_ALL, NULL, (void **)&client))) goto activated;
+      }
+    }
     snprintf(err, err_len, "无法激活音频客户端");
     goto fail;
+  }
+activated:
+
+  if (!cfg->exclusive) {
+    WAVEFORMATEX *mix = NULL;
+    if (SUCCEEDED(IAudioClient_GetMixFormat(client, &mix)) && mix) {
+      if (mix->nChannels < cfg->channels) {
+        snprintf(err, err_len, "共享混音器只有 %d 声道，无法原样输出 %d 声道；请使用支持多声道的独占设备",
+                 (int)mix->nChannels, cfg->channels);
+        CoTaskMemFree(mix);
+        goto fail;
+      }
+      CoTaskMemFree(mix);
+    }
   }
 
   WAVEFORMATEXTENSIBLE wfx;
@@ -258,9 +293,7 @@ static int wasapi_open(const NaoeConfig *cfg, NaoeFormat *actual, int *buffer_fr
     }
   }
 
-  DWORD flags = cfg->exclusive
-                     ? AUDCLNT_STREAMFLAGS_EVENTCALLBACK
-                     : (AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY);
+  DWORD flags = cfg->exclusive ? 0 : (AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY);
   REFERENCE_TIME duration = (REFERENCE_TIME)(cfg->buffer_ms > 0 ? cfg->buffer_ms : 10) * 10000;
   hr = IAudioClient_Initialize(client, cfg->exclusive ? AUDCLNT_SHAREMODE_EXCLUSIVE : AUDCLNT_SHAREMODE_SHARED,
                                flags, duration, cfg->exclusive ? duration : 0, &wfx.Format, NULL);
@@ -275,13 +308,6 @@ static int wasapi_open(const NaoeConfig *cfg, NaoeFormat *actual, int *buffer_fr
   IAudioClient_GetBufferSize(client, &buffer);
   handle = (WasapiHandle *)calloc(1, sizeof(WasapiHandle));
   if (!handle) { snprintf(err, err_len, "内存不足"); goto fail; }
-  if (cfg->exclusive) {
-    handle->event = CreateEventW(NULL, FALSE, FALSE, NULL);
-    if (!handle->event || FAILED(IAudioClient_SetEventHandle(client, handle->event))) {
-      snprintf(err, err_len, "无法创建 WASAPI 事件");
-      goto fail;
-    }
-  }
   handle->device = device;
   handle->client = client;
   if (FAILED(IAudioClient_GetService(client, &IID_IAudioRenderClient, (void **)&handle->render))) {

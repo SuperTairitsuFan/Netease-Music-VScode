@@ -1,8 +1,8 @@
 {
-  "name": "netease-music",
-  "displayName": "网易云音乐",
-  "description": "网易云音乐 for VS Code：EAPI 直连、PC 风侧边栏、歌单/歌手/搜索/评论、封面下载与原生音频输出。",
-  "version": "0.3.84",
+  "name": "netease-music-vscode",
+  "displayName": "网易云音乐 for VS Code（非官方）",
+  "description": "非官方第三方网易云音乐客户端：EAPI 直连、PC 风侧边栏、歌单/歌手/搜索/评论、封面下载与原生音频输出。",
+  "version": "1.0.83",
   "publisher": "AICis",
   "license": "MIT",
   "engines": {
@@ -42,7 +42,7 @@
       "activitybar": [
         {
           "id": "neteaseMusic",
-          "title": "网易云音乐",
+          "title": "网易云音乐（非官方）",
           "icon": "media/activity.png"
         }
       ]
@@ -52,9 +52,9 @@
         {
           "type": "webview",
           "id": "neteaseMusic.sidebar",
-          "name": "网易云音乐",
+          "name": "网易云音乐（非官方）",
           "icon": "media/activity.png",
-          "contextualTitle": "网易云音乐"
+          "contextualTitle": "网易云音乐（非官方）"
         }
       ]
     },
@@ -349,8 +349,8 @@
             "始终使用 Chromium WebAudio（共享模式，采样率由系统决定）",
             "强制使用原生音频输出引擎；不可用时明确报错，不静默回退"
           ],
-          "default": "auto",
-          "markdownDescription": "音频输出路径。auto 优先 WebAudio；native 强制原生引擎。"
+          "default": "webaudio",
+          "markdownDescription": "音频输出路径。默认 WebAudio；原生引擎需手动选择 native。"
         },
         "neteaseMusic.output.device": {
           "type": "string",
@@ -398,7 +398,7 @@
         },
         "neteaseMusic.output.exclusive": {
           "type": "boolean",
-          "default": true,
+          "default": false,
           "markdownDescription": "请求独占模式（Windows WASAPI Exclusive / Linux ALSA `hw:` 直连）。独占模式下可绕过系统混音器与采样率转换；被其他程序占用时会报错。"
         },
         "neteaseMusic.output.bufferMs": {
@@ -652,8 +652,8 @@
             "asio"
           ],
           "enumDescriptions": [
-            "Windows WASAPI（事件驱动/独占）",
-            "ASIO 直通（需要 DAC 厂商 ASIO 驱动）"
+            "Windows WASAPI（兼容好，支持独占模式）",
+            "ASIO（需要 DAC 厂商驱动）"
           ],
           "default": "wasapi",
           "markdownDescription": "原生引擎后端。ASIO 绕过 Windows 混音器，适合 USB DAC 高采样率。"
@@ -697,6 +697,109 @@
           "type": "boolean",
           "default": true,
           "markdownDescription": "状态栏显示歌名跑马灯"
+        },
+        "neteaseMusic.status.showLyrics": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "状态栏显示歌词悬浮窗按钮"
+        },
+        "neteaseMusic.lyricsOverlay.enabled": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "启用桌面歌词悬浮窗"
+        },
+        "neteaseMusic.lyricsOverlay.font": {
+          "type": "string",
+          "default": "Microsoft YaHei UI",
+          "markdownDescription": "歌词字体"
+        },
+        "neteaseMusic.lyricsOverlay.size": {
+          "type": "number",
+          "default": 30,
+          "minimum": 12,
+          "maximum": 96,
+          "markdownDescription": "当前歌词字号"
+        },
+        "neteaseMusic.lyricsOverlay.color": {
+          "type": "string",
+          "default": "#ffffff",
+          "markdownDescription": "歌词颜色"
+        },
+        "neteaseMusic.lyricsOverlay.opacity": {
+          "type": "number",
+          "default": 85,
+          "minimum": 10,
+          "maximum": 100,
+          "markdownDescription": "悬浮窗透明度（%）"
+        },
+        "neteaseMusic.lyricsOverlay.width": {
+          "type": "number",
+          "default": 900,
+          "minimum": 200,
+          "markdownDescription": "悬浮窗宽度"
+        },
+        "neteaseMusic.lyricsOverlay.height": {
+          "type": "number",
+          "default": 220,
+          "minimum": 60,
+          "markdownDescription": "悬浮窗高度"
+        },
+        "neteaseMusic.lyricsOverlay.locked": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "锁定悬浮窗（鼠标穿透）"
+        },
+        "neteaseMusic.lyricsOverlay.x": {
+          "type": "number",
+          "default": -1,
+          "markdownDescription": "悬浮窗 X 坐标，-1 为自动"
+        },
+        "neteaseMusic.lyricsOverlay.y": {
+          "type": "number",
+          "default": -1,
+          "markdownDescription": "悬浮窗 Y 坐标，-1 为自动"
+        },
+        "neteaseMusic.lyricsOverlay.weight": {
+          "type": "number",
+          "default": 600,
+          "minimum": 100,
+          "maximum": 900,
+          "markdownDescription": "歌词字重（100–900）"
+        },
+        "neteaseMusic.lyricsOverlay.fontFile": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "自定义字体文件路径（ttf/otf）"
+        },
+        "neteaseMusic.lyricsOverlay.borderWidth": {
+          "type": "number",
+          "default": 0,
+          "minimum": 0,
+          "maximum": 8
+        },
+        "neteaseMusic.lyricsOverlay.borderColor": {
+          "type": "string",
+          "default": "#ffffff"
+        },
+        "neteaseMusic.playback.startOnLaunch": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "VS Code 启动时自动继续上次队列并开始播放"
+        },
+        "neteaseMusic.lyricsOverlay.startOnLaunch": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "VS Code 启动时自动打开歌词悬浮窗（需同时启用歌词悬浮窗）"
+        },
+        "neteaseMusic.output.persistentSeek": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "长驻原生 seek：同一设备内拖动进度不重启原生进程；会持续占用独占设备"
+        },
+        "neteaseMusic.output.hrtf": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "双声道空间增强：交叉馈电 + 耳间延迟 + 轻微声场扩展；会改变原声，与 Bit-perfect 互斥"
         }
       }
     },
@@ -754,6 +857,15 @@
       {
         "command": "neteaseMusic.like",
         "key": "ctrl+alt+shift+l"
+      },
+      {
+        "command": "neteaseMusic.toggleLyrics",
+        "key": "alt+shift+k",
+        "when": "activeWebviewPanelId == 'neteaseMusic.main' || focusedView == 'neteaseMusic.sidebar'"
+      },
+      {
+        "command": "neteaseMusic.toggleLyrics",
+        "key": "ctrl+alt+shift+k"
       }
     ]
   },

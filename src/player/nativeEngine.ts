@@ -116,7 +116,7 @@ export class NativeEngineSession extends EventEmitter {
     startMs: number,
     growing = false,
     donePath = "",
-    format: { exclusive: boolean; bits: number; device: string } = { exclusive: true, bits: 32, device: "default" },
+    format: { exclusive: boolean; bits: number; device: string; hrtf?: boolean } = { exclusive: true, bits: 32, device: "default" },
   ): Promise<NativeEngineSession> {
     const stat = await fs.stat(binary).catch(() => null);
     if (!stat?.isFile()) throw new Error("原生引擎不存在：" + binary);
@@ -136,6 +136,7 @@ export class NativeEngineSession extends EventEmitter {
         "--device",
         format.device,
         ...(growing ? ["--growing", "--done", donePath] : []),
+        ...(format.hrtf ? ["--hrtf", "1"] : []),
       ],
       { stdio: ["pipe", "pipe", "pipe"], windowsHide: true },
     ) as ChildProcessWithoutNullStreams;
@@ -300,6 +301,11 @@ export class NativeEngineSession extends EventEmitter {
     this.sendControl({ cmd: "resume" });
   }
 
+  async seek(milliseconds: number): Promise<void> {
+    const result = await this.request("seeked", 2000, { cmd: "seek", ms: Math.max(0, Math.round(milliseconds)) });
+    if (result?.ok === false) throw new Error("原生引擎无法跳转到目标位置");
+  }
+
   async flush(): Promise<void> {
     this.sendControl({ cmd: "flush" });
   }
@@ -371,7 +377,7 @@ export class EngineError extends Error {
   }
 }
 
-export async function probeEngine(binary: string, timeoutMs = 15000): Promise<EngineProbe> {
+export async function probeEngine(binary: string, backend: "wasapi" | "asio" = "wasapi", timeoutMs = 15000): Promise<EngineProbe> {
   try {
     const stat = await fs.stat(binary);
     if (!stat.isFile()) return { ok: false, error: "组件入口不是文件" };
@@ -379,7 +385,7 @@ export async function probeEngine(binary: string, timeoutMs = 15000): Promise<En
     return { ok: false, error: `原生引擎不存在：${binary}` };
   }
   return new Promise<EngineProbe>((resolve) => {
-    const child = spawn(binary, ["--probe"], { stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
+    const child = spawn(binary, ["--probe", "--backend", backend], { stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
     let out = "";
     let err = "";
     const timer = setTimeout(() => {

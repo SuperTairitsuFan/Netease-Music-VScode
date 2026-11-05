@@ -42,7 +42,7 @@ export class SettingsPanelProvider implements vscode.Disposable {
     );
     this.ready = false;
     this.panel.webview.html = buildHtml(this.ctx, this.panel.webview, "settings");
-    this.panel.iconPath = vscode.Uri.joinPath(this.ctx.extensionUri, "media", "settings.svg");
+    this.panel.iconPath = vscode.Uri.joinPath(this.ctx.extensionUri, "media", "icon.png");
     this.panel.onDidDispose(() => {
       this.panel = undefined;
       this.ready = false;

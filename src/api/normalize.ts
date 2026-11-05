@@ -168,6 +168,7 @@ export function normalizeComment(raw: AnyRecord): Comment | null {
     time: Number(raw.time ?? 0),
     likedCount: Number(raw.likedCount ?? 0),
     liked: Boolean(raw.liked),
+    replyCount: Number(raw.replyCount ?? raw.reply?.replyCount ?? 0) || undefined,
     replied: replied
       ? {
           user: {

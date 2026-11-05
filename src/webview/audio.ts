@@ -38,8 +38,11 @@ export class AudioEngine {
   };
   private lastTimeSent = 0;
   private rate = 1;
+  private spectrumTimer?: ReturnType<typeof setInterval>;
+  private spectrumAnalyser?: AnalyserNode;
+  private spectrumData?: Uint8Array;
 
-  constructor(private readonly send: Send) {
+  constructor(private readonly send: Send, private readonly onSpectrum?: (bands: number[]) => void) {
     this.audio.preload = "auto";
     this.audio.addEventListener("timeupdate", () => this.onTimeUpdate());
     this.audio.addEventListener("progress", () => this.onTimeUpdate());
@@ -165,6 +168,7 @@ export class AudioEngine {
   }
 
   private playElement(request: LoadRequest): void {
+    this.startSpectrum();
     if (!request.url) {
       this.send({ type: "loadError", message: "缺少播放地址" });
       return;
@@ -242,7 +246,7 @@ export class AudioEngine {
         bits: sourceBits,
         integer,
       });
-      await this.waitNativeReady(request.song.id, 3000);
+      await this.waitNativeReady(request.song.id, 8000);
 
       const channels = decoded.numberOfChannels;
       let seq = 0;
@@ -308,6 +312,53 @@ export class AudioEngine {
     }
   }
 
+  private startSpectrum(): void {
+    if (this.spectrumTimer || !this.onSpectrum) return;
+    const capture = (this.audio as HTMLAudioElement & { captureStream?: () => MediaStream }).captureStream;
+    if (!capture) return;
+    try {
+      const stream = capture.call(this.audio);
+      const Ctor = window.AudioContext ?? (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+      if (!Ctor) return;
+      const ctx = new Ctor();
+      const source = ctx.createMediaStreamSource(stream);
+      const analyser = ctx.createAnalyser();
+      analyser.fftSize = 2048;
+      analyser.smoothingTimeConstant = 0.45;
+      source.connect(analyser);
+      this.spectrumAnalyser = analyser;
+      this.spectrumData = new Uint8Array(new ArrayBuffer(analyser.frequencyBinCount));
+      const rate = ctx.sampleRate;
+      this.spectrumTimer = setInterval(() => {
+        const analyserNode = this.spectrumAnalyser;
+        const data = this.spectrumData;
+        if (!analyserNode || !data || !this.onSpectrum) return;
+        analyserNode.getByteFrequencyData(data as Uint8Array<ArrayBuffer>);
+        const bands = new Array<number>(48);
+        const top = Math.min(16000, rate * 0.475);
+        for (let i = 0; i < bands.length; i += 1) {
+          const f0 = 30 * Math.pow(top / 30, i / bands.length);
+          const f1 = 30 * Math.pow(top / 30, (i + 1) / bands.length);
+          const k0 = Math.max(1, Math.floor((f0 / rate) * analyserNode.fftSize));
+          const k1 = Math.min(data.length - 1, Math.max(k0 + 1, Math.ceil((f1 / rate) * analyserNode.fftSize)));
+          let sum = 0;
+          for (let k = k0; k < k1; k += 1) sum += data[k];
+          bands[i] = Math.min(1, sum / Math.max(1, k1 - k0) / 255);
+        }
+        this.onSpectrum(bands);
+      }, 33);
+    } catch {
+      this.stopSpectrum();
+    }
+  }
+
+  private stopSpectrum(): void {
+    if (this.spectrumTimer) clearInterval(this.spectrumTimer);
+    this.spectrumTimer = undefined;
+    this.spectrumAnalyser = undefined;
+    this.spectrumData = undefined;
+  }
+
   private pickSampleRate(value?: number): number {
     if (!value || !Number.isFinite(value)) return 44100;
     const rate = Math.round(value);
@@ -370,6 +421,7 @@ export class AudioEngine {
   }
 
   private stopInternal(): void {
+    this.stopSpectrum();
     this.nativeAbort = true;
     const waiter = this.nativeWaiter;
     if (waiter) {

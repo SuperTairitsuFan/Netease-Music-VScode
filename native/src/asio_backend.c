@@ -65,7 +65,7 @@ struct IASIO {
 typedef struct {
   IASIO *asio;
   IASIOVT *v;
-  ASIOBufferInfo buffers[2];
+  ASIOBufferInfo buffers[32];
   ASIOCallbacks callbacks;
   long buffer_frames;
   int channels;
@@ -229,24 +229,44 @@ static int find_asio_driver(wchar_t *clsid_out, size_t clsid_len, char *display_
 
 static int asio_probe(const NaoeBackend *backend, char *json, size_t json_len) {
   (void)backend;
-  wchar_t clsid[128] = {0};
-  char name[256] = {0};
-  if (!find_asio_driver(clsid, 128, name, sizeof(name))) {
+  HKEY root = NULL;
+  if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\ASIO", 0, KEY_READ | KEY_WOW64_64KEY, &root) !=
+      ERROR_SUCCESS) {
     snprintf(json, json_len, "[]");
     return 0;
   }
-  char esc[512];
-  char clsid_utf8[128] = {0};
-  wide_to_utf8(clsid, clsid_utf8, sizeof(clsid_utf8));
-  naoe_json_escape(name, esc, sizeof(esc));
-  snprintf(json, json_len,
-           "[{\"id\":\"asio:%s\",\"name\":\"ASIO: %s\",\"backend\":\"asio\",\"isDefault\":true,"
-           "\"formats\":[{\"sampleRate\":44100,\"bits\":32,\"channels\":2,\"sampleFormat\":\"s32le\"},"
-           "{\"sampleRate\":48000,\"bits\":32,\"channels\":2,\"sampleFormat\":\"s32le\"},"
-           "{\"sampleRate\":96000,\"bits\":32,\"channels\":2,\"sampleFormat\":\"s32le\"},"
-           "{\"sampleRate\":192000,\"bits\":32,\"channels\":2,\"sampleFormat\":\"s32le\"}]}]",
-           clsid_utf8, esc);
-  return 1;
+  size_t used = 0;
+  int emitted = 0;
+  used += (size_t)snprintf(json + used, json_len - used, "[");
+  for (DWORD index = 0; index < 16; index++) {
+    wchar_t subkey[256];
+    DWORD subkey_len = (DWORD)(sizeof(subkey) / sizeof(subkey[0]));
+    if (RegEnumKeyExW(root, index, subkey, &subkey_len, NULL, NULL, NULL, NULL) != ERROR_SUCCESS) break;
+    HKEY item = NULL;
+    if (RegOpenKeyExW(root, subkey, 0, KEY_READ | KEY_WOW64_64KEY, &item) != ERROR_SUCCESS) continue;
+    wchar_t clsid[128] = {0};
+    DWORD clsid_len = sizeof(clsid) - sizeof(wchar_t);
+    if (RegQueryValueExW(item, L"CLSID", NULL, NULL, (BYTE *)clsid, &clsid_len) == ERROR_SUCCESS && clsid[0]) {
+      char name[256] = {0};
+      char clsid_utf8[128] = {0};
+      char esc[512];
+      wide_to_utf8(subkey, name, sizeof(name));
+      wide_to_utf8(clsid, clsid_utf8, sizeof(clsid_utf8));
+      naoe_json_escape(name, esc, sizeof(esc));
+      used += (size_t)snprintf(json + used, json_len - used,
+                               "%s{\"id\":\"asio:%s\",\"name\":\"ASIO: %s\",\"backend\":\"asio\",\"isDefault\":%s,"
+                               "\"formats\":[{\"sampleRate\":44100,\"bits\":32,\"channels\":2,\"sampleFormat\":\"s32le\"},"
+                               "{\"sampleRate\":48000,\"bits\":32,\"channels\":2,\"sampleFormat\":\"s32le\"},"
+                               "{\"sampleRate\":96000,\"bits\":32,\"channels\":2,\"sampleFormat\":\"s32le\"},"
+                               "{\"sampleRate\":192000,\"bits\":32,\"channels\":2,\"sampleFormat\":\"s32le\"}]}",
+                               emitted ? "," : "", clsid_utf8, esc, emitted ? "false" : "true");
+      emitted++;
+    }
+    RegCloseKey(item);
+  }
+  used += (size_t)snprintf(json + used, json_len - used, "]");
+  RegCloseKey(root);
+  return emitted;
 }
 
 static void asio_fail(AsioHandle *h, const char *message) {
@@ -290,8 +310,8 @@ static DWORD WINAPI asio_thread_main(LPVOID arg) {
   }
 
   long inputs = 0, outputs = 0;
-  if (v->getChannels(asio, &inputs, &outputs) != ASE_OK || outputs < 2) {
-    asio_fail(h, "ASIO 输出通道不足");
+  if (v->getChannels(asio, &inputs, &outputs) != ASE_OK || outputs < h->channels) {
+    asio_fail(h, "ASIO 输出通道数不足");
     v->Release(asio);
     CoUninitialize();
     return 1;
@@ -341,7 +361,7 @@ static DWORD WINAPI asio_thread_main(LPVOID arg) {
   if (buffer_size > max_size) buffer_size = max_size;
   h->buffer_frames = buffer_size;
 
-  for (int ch = 0; ch < 2; ch++) {
+  for (int ch = 0; ch < h->channels; ch++) {
     ASIOChannelInfo channel;
     memset(&channel, 0, sizeof(channel));
     channel.channel = ch;
@@ -366,7 +386,7 @@ static DWORD WINAPI asio_thread_main(LPVOID arg) {
   h->callbacks.sampleRateDidChange = asio_sample_rate_changed;
   h->callbacks.asioMessage = asio_message;
   h->callbacks.bufferSwitchTimeInfo = asio_buffer_switch_time_info;
-  if (v->createBuffers(asio, h->buffers, 2, buffer_size, &h->callbacks) != ASE_OK) {
+  if (v->createBuffers(asio, h->buffers, h->channels, buffer_size, &h->callbacks) != ASE_OK) {
     asio_fail(h, "ASIOCreateBuffers 失败");
     v->Release(asio);
     CoUninitialize();
@@ -441,7 +461,7 @@ static int asio_open(const NaoeConfig *cfg, NaoeFormat *actual, int *buffer_fram
     snprintf(err, err_len, "内存不足");
     return -1;
   }
-  h->channels = 2;
+  h->channels = cfg->channels < 1 ? 2 : (cfg->channels > 32 ? 32 : cfg->channels);
   h->gain = 1.0;
   h->rate = cfg->sample_rate;
   h->buffer_ms = cfg->buffer_ms;
@@ -483,7 +503,7 @@ static int asio_open(const NaoeConfig *cfg, NaoeFormat *actual, int *buffer_fram
     return -1;
   }
   actual->sample_rate = cfg->sample_rate;
-  actual->channels = 2;
+  actual->channels = h->channels;
   actual->bits = 32;
   snprintf(actual->sample_format, sizeof(actual->sample_format), "s32le");
   *buffer_frames = (int)h->buffer_frames;
@@ -592,6 +612,7 @@ static void asio_flush(void *opaque) {
   if (!h) return;
   EnterCriticalSection(&h->lock);
   h->head = h->tail = h->count = 0;
+  h->written = 0;
   LeaveCriticalSection(&h->lock);
 }
 

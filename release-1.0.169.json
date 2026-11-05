@@ -1,0 +1,8 @@
+{
+  "tag_name": "v1.0.169",
+  "name": "v1.0.169",
+  "body": "## 网易云音乐 VS Code 扩展 v1.0.169\n\n### 本次变化\n\n- 新增“启动时自动开始播放”。\n- 关闭该选项后，启动只恢复队列并预加载当前歌曲，不自动播放，进入网易云界面保持第 0 秒暂停。\n- 新增“启动 VS Code 时自动打开歌词悬浮窗”。\n- 恢复歌词悬浮窗翻译显示，移除黑色边框，恢复透明文字背景。\n- Linux 设置页增加 ASIO、桌面歌词等不支持功能提示。\n- 修复 WASAPI 独占模式事件回调不触发导致无声的问题。\n\n### 下载\n\n- Windows x64：`netease-music-1.0.169-win32-x64.vsix`\n- Windows ARM64：`netease-music-1.0.169-win32-arm64.vsix`\n- Linux x64：`netease-music-1.0.169-linux-x64.vsix`\n- Linux ARM64：`netease-music-1.0.169-linux-arm64.vsix`\n",
+  "draft": false,
+  "prerelease": false,
+  "make_latest": "true"
+}
