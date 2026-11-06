@@ -599,7 +599,7 @@ static int serve(const NaoeBackend *backend) {
       int wrote = engine.backend->write_int(engine.handle, payload, frames, engine.format.bits);
       free(payload);
       if (wrote < 0) {
-        send_error("WRITE_FAILED", "WASAPI 整数写入失败", NULL);
+        send_error("WRITE_FAILED", "原生引擎整数 PCM 写入失败", NULL);
         break;
       }
     } else if (type == NAOE_FRAME_END) {
@@ -694,6 +694,6 @@ int main(int argc, char **argv) {
   }
   if (mode_serve) return serve(backend);
 
-  fprintf(stderr, "usage: %s --probe | --serve [--backend alsa|wasapi|null]\n", argv[0]);
+  fprintf(stderr, "usage: %s --probe | --serve [--backend wasapi|asio|alsa|coreaudio|null]\n", argv[0]);
   return 1;
 }

@@ -6,7 +6,7 @@
 >
 > 如果官方下场、提出异议，或要求停止分发，我会立即下架相关项目文档、GitHub 仓库、Release 和 Marketplace 插件，不继续分发。
 
-在 VS Code 里做一个桌面客户端形态的网易云音乐：侧边栏管理歌单，编辑器区浏览歌曲、歌手、专辑、评论，底部状态条控制播放。数据通过 EAPI 获取，可选 Windows WASAPI / ASIO / Linux ALSA 原生音频输出。
+在 VS Code 里做一个桌面客户端形态的网易云音乐：侧边栏管理歌单，编辑器区浏览歌曲、歌手、专辑、评论，底部状态条控制播放。数据通过 EAPI 获取，可选 Windows WASAPI / ASIO、macOS CoreAudio、Linux ALSA 原生音频输出。
 
 项目只用于个人学习、折腾和自用，不商用，不提供、不托管任何音乐内容。
 
@@ -26,7 +26,7 @@
 
 - 推荐、每日推荐、歌单、歌手、专辑、搜索、排行榜、播客、本地音乐、云盘
 - 歌曲详情、评论、回复、点赞、收藏到歌单
-- 原生 WASAPI Shared / Exclusive、ASIO、Linux ALSA
+- 原生 WASAPI Shared / Exclusive、ASIO、macOS CoreAudio、Linux ALSA
 - 1–8 声道源文件按实际声道输出；设备通道不足时明确报错
 - 沉浸环绕声（5.1）音质选项
 - 双声道 HRTF 空间增强；与 Bit-perfect 互斥
@@ -60,6 +60,8 @@ vscode:extension/AICis.netease-music-vscode
 ```text
 win32-x64
 win32-arm64
+darwin-arm64
+darwin-x64
 linux-x64
 linux-arm64
 ```
@@ -82,6 +84,7 @@ code --install-extension netease-music-vscode-1.0.83-win32-x64.vsix
 ## 音频
 
 - Windows：WASAPI Shared / Exclusive、ASIO
+- macOS：CoreAudio（HAL AudioUnit），支持设备选择与 Hog Mode 独占
 - Linux：ALSA
 - WebAudio：默认兼容路径
 - 原生输出按源文件声道数打开；设备输出通道不足时拒绝静默降混
@@ -108,7 +111,7 @@ WebAudio：不能原样输出 5.1
 
 ## 从源码构建
 
-要求 Node.js ≥ 20、npm。构建原生组件还需要 [zig](https://ziglang.org/) 0.15.x。
+要求 Node.js ≥ 20、npm。Linux / Windows 原生组件使用 [zig](https://ziglang.org/) 0.15.x 交叉编译；macOS 原生组件使用 Xcode Command Line Tools 的 clang 和系统 AudioToolbox / CoreAudio 框架。
 
 ```bash
 npm install
@@ -117,13 +120,29 @@ npm run build
 npm test
 ```
 
+macOS 本机构建：
+
+```bash
+node scripts/build-native.mjs darwin-arm64   # Apple Silicon
+node scripts/build-native.mjs darwin-x64     # Intel
+node scripts/package.mjs darwin-arm64 --skip-build
+```
+
+产物位于 `dist-vsix/`。
+
 打包：
 
 ```bash
 node scripts/package.mjs --all --skip-build
 ```
 
-产物位于 `dist-vsix/`。
+`--all` 会尝试构建全部平台；在 macOS 上请只指定 `darwin-arm64` / `darwin-x64`，或先准备好 zig 工具链。产物位于 `dist-vsix/`。
+
+## 平台说明
+
+- macOS 音频使用 CoreAudio，Hog Mode 为“独占”的实现方式；是否真正绕过系统混音取决于设备和 macOS，Bit-perfect 不保证完全等效于 Windows WASAPI Exclusive。
+- 桌面歌词悬浮窗和 SMTC 系统媒体卡目前仅支持 Windows；macOS 仍可使用播放页歌词、状态栏歌词和完整的播放控制。
+- 安装包按平台区分：Apple Silicon 使用 `darwin-arm64`，Intel Mac 使用 `darwin-x64`。
 
 ## 数据与隐私
 

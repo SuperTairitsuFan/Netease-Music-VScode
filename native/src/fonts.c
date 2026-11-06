@@ -1,9 +1,9 @@
 /* Enumerate installed system font families for the settings dropdown. */
-#include <windows.h>
 #include <stdio.h>
 #include <string.h>
 
 #if defined(_WIN32)
+#include <windows.h>
 
 static int CALLBACK font_callback(const ENUMLOGFONTEXW *lf, const TEXTMETRICW *tm, DWORD type, LPARAM lparam) {
   (void)tm;

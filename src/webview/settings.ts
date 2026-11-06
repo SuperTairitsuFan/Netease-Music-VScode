@@ -429,6 +429,7 @@ function renderGeneral(): string {
 function renderSystem(): string {
   const cfg = settings!;
   const isLinux = state?.platform === "linux";
+  const isMac = state?.platform === "darwin";
   const devices = native.devices ?? [];
   const hasAsio = devices.some((device) => device.backend === "asio");
   const backendDevices = devices.filter((device) => device.backend === cfg.nativeBackend);
@@ -441,23 +442,27 @@ function renderSystem(): string {
   const bitOptions = ["auto", "16", "24", "32"];
   const sampleFormats = ["auto", "s16le", "s24le", "s32le", "f32le"];
   return `<div class="set-card"><div class="set-card-head"><div class="t">音频输出</div><div class="d">原生引擎由独立组件提供，可启用 / 禁用 / 卸载</div></div>
-    ${isLinux ? `<div class="set-row"><div><div class="label">Linux 支持</div><div class="hint">当前 Linux 使用 ALSA 原生输出；WASAPI / ASIO 为 Windows 专用，ASIO 选项不可用。请等后续完善。</div></div></div>` : ""}
+    ${isMac ? `<div class="set-row"><div><div class="label">macOS 支持</div><div class="hint">当前 macOS 使用 CoreAudio 原生输出（HAL AudioUnit）；支持设备选择与 Hog Mode 独占。WASAPI / ASIO / ALSA 为其他平台专用。</div></div></div>` : isLinux ? `<div class="set-row"><div><div class="label">Linux 支持</div><div class="hint">当前 Linux 使用 ALSA 原生输出；WASAPI / ASIO 为 Windows 专用，ASIO 选项不可用。请等后续完善。</div></div></div>` : ""}
     ${selectRow("输出模式", bluetooth ? "蓝牙设备默认使用 WebAudio，原生引擎暂不可选" : "默认 WebAudio；native 强制原生，失败不回退", "output.mode", cfg.outputMode, [
       { value: "auto", label: "自动（优先 WebAudio，开箱即用）" },
       { value: "webaudio", label: "仅 WebAudio（免驱动，可能被浏览器拦截）" },
       { value: "native", label: "仅原生引擎（独占，需组件）", disabled: bluetooth },
     ])}
     <div class="set-row"><div><div class="label">输出设备</div><div class="hint">${esc(selectedDevice?.name ?? (cfg.device || "系统默认设备"))}${bluetooth ? " · 蓝牙设备" : ""}</div></div><div class="control"><button class="btn small" data-act="probeAudio">${icon("pulse", 11)} 探测</button><button class="btn small" data-act="selectDevice">${icon("device", 11)} 选择设备</button></div></div>
-    ${selectRow("原生后端", isLinux ? "当前 Linux 不支持 ASIO，请等后续完善" : bluetooth ? "蓝牙设备固定使用 WebAudio，原生后端不可选" : hasAsio ? "检测到 ASIO 驱动，可手动选择；默认使用 WASAPI" : "未检测到 ASIO 驱动，只能使用 WASAPI", "output.backend", cfg.nativeBackend, [
+    ${selectRow("原生后端", isMac ? "macOS 使用 CoreAudio，支持设备选择与 Hog Mode 独占" : isLinux ? "Linux 使用 ALSA 原生输出" : bluetooth ? "蓝牙设备固定使用 WebAudio，原生后端不可选" : hasAsio ? "检测到 ASIO 驱动，可手动选择；默认使用 WASAPI" : "未检测到 ASIO 驱动，只能使用 WASAPI", "output.backend", cfg.nativeBackend, isMac ? [
+      { value: "coreaudio", label: "CoreAudio（macOS 系统音频）" },
+    ] : isLinux ? [
+      { value: "alsa", label: "ALSA（Linux 系统音频）" },
+    ] : [
       { value: "wasapi", label: "WASAPI（兼容好，支持独占模式）" },
-      { value: "asio", label: "ASIO（需厂商驱动）", disabled: !hasAsio || isLinux },
+      { value: "asio", label: "ASIO（需厂商驱动）", disabled: !hasAsio },
     ], bluetooth)}
-    <div class="set-row"><div><div class="label">怎么选</div><div class="hint">默认使用 WebAudio；原生后端默认 WASAPI。检测到 ASIO 驱动后可手动选择 ASIO。独占、Bit-perfect 与长驻 seek 默认关闭。</div></div></div>
+    <div class="set-row"><div><div class="label">怎么选</div><div class="hint">${isMac ? "默认使用 WebAudio；原生后端固定为 CoreAudio。需要设备独占时再开启独占模式。" : isLinux ? "默认使用 WebAudio；原生后端固定为 ALSA。需要直连硬件时选择 hw: 设备。" : "默认使用 WebAudio；原生后端默认 WASAPI。检测到 ASIO 驱动后可手动选择 ASIO。独占、Bit-perfect 与长驻 seek 默认关闭。"}</div></div></div>
     <div class="set-row"><div><div class="label">重启 VS Code</div><div class="hint">关闭所有 VS Code 窗口后自动重新启动，组件/设置改动会生效</div></div><div class="control"><button class="btn small" data-act="restartApp">重启生效</button></div></div>
-    ${switchRow("独占模式", bluetooth ? "蓝牙设备默认使用 WebAudio，独占模式不可用" : "Windows WASAPI Exclusive / Linux ALSA hw: 直连，绕过系统混音器", "output.exclusive", cfg.exclusive, bluetooth)}
-    ${switchRow("Bit-perfect（严格）", bluetooth ? "蓝牙链路会重采样，Bit-perfect 不可用" : "强制原生 Exclusive + 源采样率/位深；音量固定 100%，不做增益", "output.bitPerfect", cfg.bitPerfect, bluetooth)}
+    ${switchRow("独占模式", bluetooth ? "蓝牙设备默认使用 WebAudio，独占模式不可用" : isMac ? "CoreAudio Hog Mode：独占设备，其他应用暂时无法使用；失败时自动回到共享模式" : "Windows WASAPI Exclusive / Linux ALSA hw: 直连，绕过系统混音器", "output.exclusive", cfg.exclusive, bluetooth)}
+    ${switchRow("Bit-perfect（严格）", bluetooth ? "蓝牙链路会重采样，Bit-perfect 不可用" : "强制原生独占 + 源采样率/位深；音量固定 100%，不做增益", "output.bitPerfect", cfg.bitPerfect, bluetooth)}
     ${switchRow("双声道空间增强（HRTF）", "交叉馈电 + 耳间延迟 + 轻微声场扩展，让耳机更接近音箱；仅原生引擎生效，会改变原声，与 Bit-perfect 互斥", "output.hrtf", cfg.hrtf, bluetooth)}
-    <div class="set-row"><div><div class="label">长驻 seek 说明</div><div class="hint">作用：同一首歌、同一设备内拖动进度条更快，不再反复释放和打开 WASAPI/ASIO。<br>可能的问题：暂停后仍占用独占设备，其他软件可能没有声音；切换设备或后端仍会重开；下载中的 .part 文件仍走原逻辑。<br>解决：没有声音时关闭此选项并重新播放；需要释放设备时暂停并关闭此选项，或改用 WASAPI 共享。</div></div></div>
+    <div class="set-row"><div><div class="label">长驻 seek 说明</div><div class="hint">作用：同一首歌、同一设备内拖动进度条更快，不再反复释放和打开音频设备（WASAPI / ASIO / ALSA / CoreAudio）。<br>可能的问题：暂停后仍占用独占设备，其他软件可能没有声音；切换设备或后端仍会重开；下载中的 .part 文件仍走原逻辑。<br>解决：没有声音时关闭此选项并重新播放；需要释放设备时暂停并关闭此选项，或改用共享模式。</div></div></div>
     ${switchRow("长驻原生 seek","开启后同一设备内点击进度条只重新定位解码，不重启原生进程、不重新打开 DAC；会持续占用独占设备。切换设备/后端仍会重新打开。","output.persistentSeek",cfg.persistentSeek)}
     ${selectRow("采样率", "auto 跟随音源；手动值必须与音源一致（引擎不做重采样）", "output.sampleRate", cfg.sampleRate, formatOptions.map((value) => ({ value, label: value === "auto" ? "auto（跟随音源）" : `${Number(value) / 1000} kHz` })))}
     ${selectRow("位深", "32 bit 是否可用取决于 USB DAC 与驱动", "output.bitDepth", cfg.bitDepth, bitOptions.map((value) => ({ value, label: value === "auto" ? "auto" : `${value} bit` })))}
@@ -471,13 +476,20 @@ function renderSystem(): string {
       .join("")}</div></div></div>` : ""}
   </div>
   <div class="set-card"><div class="set-card-head"><div class="t">音频故障排查</div><div class="d">无声、无法播放或设备切换失败时按顺序检查</div></div>
+    ${isMac ? `
+    <div class="set-row"><div><div class="label">CoreAudio 无法播放</div><div class="hint">关闭“独占模式”和“Bit-perfect”，把输出模式改为 WebAudio 后重新播放；如果恢复，说明设备的独占格式或 Hog Mode 不可用。</div></div></div>
+    <div class="set-row"><div><div class="label">设备被其他应用占用</div><div class="hint">CoreAudio Hog Mode 与部分播放器、会议软件冲突；关闭占用设备的程序，或关闭独占模式改用共享输出。</div></div></div>
+    <div class="set-row"><div><div class="label">采样率或位深不支持</div><div class="hint">把采样率、位深、样本格式都改为 auto；仍失败时把位深改为 16 bit，再重新选择设备。</div></div></div>
+    <div class="set-row"><div><div class="label">蓝牙耳机无声</div><div class="hint">蓝牙通常只能使用 WebAudio；不要开启独占或 Bit-perfect，设备切换后重新选择蓝牙端点。</div></div></div>
+    <div class="set-row"><div><div class="label">拔掉 DAC 后列表还有旧设备</div><div class="hint">重新插拔后点“探测”，再选择当前存在的设备；设备 ID 为 CoreAudio UID。</div></div></div>
+    <div class="set-row"><div><div class="label">进度条不走或一直无声</div><div class="hint">关闭其他播放器释放独占；仍卡住时退出所有 VS Code 窗口后重开，并清除残留缓存。</div></div></div>` : `
     <div class="set-row"><div><div class="label">耳机不支持 ASIO，却选中了 ASIO</div><div class="hint">切到 WASAPI 后端，再选择该耳机的 WASAPI 设备；没有 ASIO 驱动时不要强行使用 ASIO。</div></div></div>
     <div class="set-row"><div><div class="label">ASIO 无声、打开失败或被占用</div><div class="hint">关闭其他正在独占声卡的软件；仍失败时改用 WASAPI。ASIO 同时只能被一个程序占用。</div></div></div>
     <div class="set-row"><div><div class="label">WASAPI 无法播放</div><div class="hint">关闭“独占模式”和“Bit-perfect”，把输出模式改为 WebAudio 后重新播放；如果恢复，说明设备的独占格式不可用。</div></div></div>
     <div class="set-row"><div><div class="label">采样率或位深不支持</div><div class="hint">把采样率、位深、样本格式都改为 auto；仍失败时把位深改为 16 bit，或切换 WASAPI。</div></div></div>
     <div class="set-row"><div><div class="label">蓝牙耳机无声</div><div class="hint">蓝牙通常只能使用 WebAudio；不要开启独占或 Bit-perfect。设备切换后重新选择蓝牙端点。</div></div></div>
     <div class="set-row"><div><div class="label">拔掉 DAC 后列表还有旧设备</div><div class="hint">重新插拔后点“探测”，再选择当前存在的设备；不要继续使用已拔掉的 ASIO/WASAPI ID。</div></div></div>
-    <div class="set-row"><div><div class="label">进度条不走或一直无声</div><div class="hint">关闭其他播放器释放独占；仍卡住时退出所有 VS Code 窗口后重开，并清除残留缓存。</div></div></div>
+    <div class="set-row"><div><div class="label">进度条不走或一直无声</div><div class="hint">关闭其他播放器释放独占；仍卡住时退出所有 VS Code 窗口后重开，并清除残留缓存。</div></div></div>`}
   </div>
   <div class="set-card"><div class="set-card-head"><div class="t">输出链路</div><div class="d">当前实际路径</div></div>
     <div class="set-row stack"><div class="control" style="display:block"><div class="chain">
@@ -597,12 +609,19 @@ function componentCard(item: ComponentView): string {
 function fontOptions(current: string, key: string): string {
   const list = [...(settings?.fonts ?? [])];
   if (current && !list.includes(current)) list.unshift(current);
-  if (!list.length) list.push("Microsoft YaHei UI", "Microsoft YaHei", "SimHei", "SimSun");
+  if (!list.length) {
+    list.push(
+      state?.platform === "darwin" ? "PingFang SC" : state?.platform === "linux" ? "Noto Sans CJK SC" : "Microsoft YaHei UI",
+      ...(state?.platform === "darwin" ? ["Helvetica Neue"] : ["Microsoft YaHei", "SimHei", "SimSun"]),
+    );
+  }
   return '<select data-config="' + key + '">' + list.map((name) => '<option value="' + esc(name) + '"' + (name === current ? ' selected' : '') + '>' + esc(name) + '</option>').join("") + '</select>';
 }
 
 function renderComponents(): string {
   const isLinux = state?.platform === "linux";
+  const isMac = state?.platform === "darwin";
+  const noLyricsOverlay = isLinux || isMac;
   const builtins = components.filter((item) => item.kind === "builtin");
   const natives = components.filter((item) => item.kind === "native");
   const uis = components.filter((item) => item.kind === "ui");
@@ -614,7 +633,7 @@ function renderComponents(): string {
     <div class="set-card headless" style="margin:0;border:0;border-radius:0"><div class="set-card-head"><div class="t">组件 UI</div></div>
     <div class="set-section-title">状态栏</div>
     ${switchRow("状态栏：歌名跑马灯","显示/隐藏状态栏歌名","status.showTitle",settings!.showTitle)}
-    ${switchRow("状态栏：歌词","显示/隐藏状态栏歌词悬浮窗按钮","status.showLyrics",settings!.showLyricsButton)}${isLinux ? `<div class="set-row"><div><div class="label">Linux 支持</div><div class="hint">当前 Linux 不支持桌面歌词悬浮窗，请等后续完善。状态栏按钮仍可显示，但不会创建悬浮窗。</div></div></div>` : ""}
+    ${switchRow("状态栏：歌词","显示/隐藏状态栏歌词悬浮窗按钮","status.showLyrics",settings!.showLyricsButton)}${isMac ? `<div class="set-row"><div><div class="label">macOS 支持</div><div class="hint">当前 macOS 暂不支持桌面歌词悬浮窗；状态栏歌词与播放页歌词不受影响。</div></div></div>` : isLinux ? `<div class="set-row"><div><div class="label">Linux 支持</div><div class="hint">当前 Linux 不支持桌面歌词悬浮窗，请等后续完善。状态栏按钮仍可显示，但不会创建悬浮窗。</div></div></div>` : ""}
     ${switchRow("状态栏：缓冲","显示/隐藏状态栏缓冲框","status.showBuffer",settings!.showBuffer)}
     ${switchRow("状态栏：喜欢","显示/隐藏状态栏喜欢按钮","status.showLike",settings!.showLike)}
     ${switchRow("状态栏：收藏","显示/隐藏状态栏收藏到歌单按钮","status.showFavorite",settings!.showFavorite)}
@@ -622,10 +641,10 @@ function renderComponents(): string {
     ${switchRow("状态栏：上一首/播放/下一首","显示/隐藏状态栏导航按钮","status.showNavigation",settings!.showNavigation)}
     ${switchRow("状态栏：播放队列","显示/隐藏状态栏队列按钮","status.showQueue",settings!.showQueue)}
     <details class="lyrics-details" ${lyricsDetailsOpen ? "open" : ""}><summary>歌词悬浮窗</summary>
-      ${isLinux ? `<div class="set-row"><div><div class="label">Linux 支持</div><div class="hint">当前 Linux 不支持歌词悬浮窗，请等后续完善。</div></div></div>` : ""}
+      ${isMac ? `<div class="set-row"><div><div class="label">macOS 支持</div><div class="hint">当前 macOS 暂不支持歌词悬浮窗；播放页与状态栏歌词不受影响。</div></div></div>` : isLinux ? `<div class="set-row"><div><div class="label">Linux 支持</div><div class="hint">当前 Linux 不支持歌词悬浮窗，请等后续完善。</div></div></div>` : ""}
       <div class="set-section-title">开关</div>
-      ${switchRow("启用歌词悬浮窗","关闭后不启动原生悬浮窗进程","lyricsOverlay.enabled",settings!.lyricsEnabled, isLinux)}
-      ${switchRow("启动 VS Code 时自动打开","开启后由启动流程自动显示歌词悬浮窗；关闭则只在手动打开时显示","lyricsOverlay.startOnLaunch",settings!.lyricsStartOnLaunch, isLinux)}
+      ${switchRow("启用歌词悬浮窗","关闭后不启动原生悬浮窗进程","lyricsOverlay.enabled",settings!.lyricsEnabled, noLyricsOverlay)}
+      ${switchRow("启动 VS Code 时自动打开","开启后由启动流程自动显示歌词悬浮窗；关闭则只在手动打开时显示","lyricsOverlay.startOnLaunch",settings!.lyricsStartOnLaunch, noLyricsOverlay)}
       <div class="set-section-title">第一行歌词</div>
       <div class="set-row"><div><div class="label">颜色</div><div class="hint">当前歌词颜色</div></div><div class="control"><input id="lyrics-color" type="color" value="${settings!.lyricsColor}" /><button class="btn small" data-act="applyLyricsColor">确定</button></div></div>
       <div class="set-row"><div><div class="label">字号</div><div class="hint">12–96</div></div><div class="control"><input type="number" min="12" max="96" value="${settings!.lyricsSize}" data-config="lyricsOverlay.size" style="width:90px" /></div></div>

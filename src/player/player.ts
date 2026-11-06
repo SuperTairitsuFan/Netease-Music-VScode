@@ -3,7 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import * as vscode from "vscode";
 import type { SessionManager } from "../auth/session";
-import type { MusicConfig, PlayMode, Quality } from "../config";
+import type { MusicConfig, NativeBackend, PlayMode, Quality } from "../config";
 import { QUALITY_LABELS } from "../config";
 import type { LyricPayload, SongUrlResult, Track } from "../api/types";
 import type { HostMessage, LoadRequest, NativeFormatView, OutputView, PlaybackSource, PlayerState, WebviewMessage } from "../protocol";
@@ -63,7 +63,7 @@ export class PlayerService implements vscode.Disposable {
   private nativeSession?: NativeEngineSession;
   private nativeEntryPath = "";
   private nativeFilePath = "";
-  private nativeBackend: "wasapi" | "asio" = "wasapi";
+  private nativeBackend: NativeBackend = process.platform === "darwin" ? "coreaudio" : process.platform === "linux" ? "alsa" : "wasapi";
   private nativeGrowing = false;
   private nativeDonePath = "";
   private nativeRate = 0;
@@ -863,11 +863,11 @@ export class PlayerService implements vscode.Disposable {
         if (useNativeCached) {
           const record = await this.components.nativeRecord();
           if (!record?.entryPath) throw new Error("原生引擎组件不存在");
-          const backendName = this.getConfig().output.backend === "asio" ? "asio" : "wasapi";
+          const backend = this.getConfig().output.backend;
           this.loading = false;
           this.playing = true;
           this.mediaLoaded = true;
-          await this.startStreamNative(record.entryPath, cachedAudio, backendName, position);
+          await this.startStreamNative(record.entryPath, cachedAudio, backend, position);
           log.info("startup timing", { resolve: 0, total: Date.now() - timingStart, cached: true });
           return;
         }
@@ -889,6 +889,7 @@ export class PlayerService implements vscode.Disposable {
 
       const resolvedAt = Date.now();
       const useNative = await this.shouldUseNative();
+      const backend = this.getConfig().output.backend;
       if (token !== this.playToken) return;
       if (useNative) {
         try {
@@ -897,14 +898,13 @@ export class PlayerService implements vscode.Disposable {
             : await this.ensureStreamingFile(song, resolved, token);
           if (cachedPreload) this.preload = undefined;
           if (token !== this.playToken) return;
-          const backendName = this.getConfig().output.backend === "asio" ? "asio" : "wasapi";
           if (this.getConfig().output.streaming) {
             try {
               const streamRecord = await this.components.nativeRecord();
               if (!streamRecord?.entryPath) throw new Error("原生引擎组件不存在");
               const growing = Boolean(this.growing && filePath.endsWith(".part"));
               const donePath = growing ? this.growing?.donePath ?? "" : "";
-              await this.startStreamNative(streamRecord.entryPath, filePath, backendName, position, growing, donePath);
+              await this.startStreamNative(streamRecord.entryPath, filePath, backend, position, growing, donePath);
               log.info("startup timing", { resolve: resolvedAt - timingStart, total: Date.now() - timingStart, preloaded: Boolean(cachedPreload) });
               return;
             } catch (err) {
@@ -923,7 +923,7 @@ export class PlayerService implements vscode.Disposable {
             gain: resolved.gain,
             trialEnd: this.trialEnd,
             sourceSampleRate: resolved.sampleRate,
-            sourceBits: this.getConfig().output.backend === "asio" ? 32 : this.sourceBits(resolved),
+            sourceBits: this.nativeSourceBits(resolved, backend),
             integerPcm: this.getConfig().output.bitPerfect,
           };
           this.mediaLoaded = true;
@@ -953,7 +953,7 @@ export class PlayerService implements vscode.Disposable {
         gain: resolved.gain,
         trialEnd: this.trialEnd,
         sourceSampleRate: resolved.sampleRate,
-        sourceBits: this.getConfig().output.backend === "asio" ? 32 : this.sourceBits(resolved),
+        sourceBits: this.nativeSourceBits(resolved, backend),
         integerPcm: this.getConfig().output.bitPerfect,
       };
       this.mediaLoaded = true;
@@ -974,6 +974,25 @@ export class PlayerService implements vscode.Disposable {
       this.emit();
       this.post({ type: "playerError", message: this.error });
     }
+  }
+
+  private nativeDevice(backend: NativeBackend, configured: string | undefined): string {
+    const device = configured ?? "";
+    if (backend === "wasapi") return device && !device.startsWith("asio:") ? device : "default";
+    if (backend === "asio") return device.startsWith("asio:") ? device : "default";
+    return device || "default";
+  }
+
+  private backendLabel(backend: NativeBackend): string {
+    if (backend === "asio") return "ASIO";
+    if (backend === "wasapi") return "WASAPI";
+    if (backend === "coreaudio") return "CoreAudio";
+    return "ALSA";
+  }
+
+  /** ASIO always opens a 32-bit container; CoreAudio keeps the source depth. */
+  private nativeSourceBits(resolved: SongUrlResult, backend: NativeBackend): number {
+    return backend === "asio" ? 32 : this.sourceBits(resolved);
   }
 
   private sourceBits(resolved: SongUrlResult): number {
@@ -1129,7 +1148,7 @@ export class PlayerService implements vscode.Disposable {
   private async startStreamNative(
     entryPath: string,
     filePath: string,
-    backend: "wasapi" | "asio",
+    backend: NativeBackend,
     position: number,
     growing = false,
     donePath = "",
@@ -1140,8 +1159,8 @@ export class PlayerService implements vscode.Disposable {
     this.growing = growingState;
     const cfg = this.getConfig();
     const exclusive = backend === "asio" ? true : cfg.output.bitPerfect || cfg.output.exclusive;
-    const bits = backend === "asio" ? 32 : exclusive ? 32 : 16;
-    const device = backend === "asio" ? (cfg.output.device?.startsWith("asio:") ? cfg.output.device : "default") : (cfg.output.device && !cfg.output.device.startsWith("asio:") ? cfg.output.device : "default");
+    const bits = backend === "coreaudio" || backend === "asio" ? 32 : exclusive ? 32 : 16;
+    const device = this.nativeDevice(backend, cfg.output.device);
     const session = await NativeEngineSession.startFile(
       entryPath,
       filePath,
@@ -1166,7 +1185,7 @@ export class PlayerService implements vscode.Disposable {
       this.output = {
         kind: "native",
         label: `Native Engine · ${streamFormat.sampleRate} Hz / ${streamFormat.bits} bit`,
-        detail: `${backend === "asio" ? "ASIO" : "WASAPI"} 流式解码 · ${streamFormat.sampleFormat}`,
+        detail: `${this.backendLabel(backend)} 流式解码 · ${streamFormat.sampleFormat}`,
         backend,
       };
     }
@@ -1332,19 +1351,24 @@ export class PlayerService implements vscode.Disposable {
       return;
     }
     const rate = requestedRate;
-    const exclusive = bitPerfect || cfg.output.exclusive || rate > 48000;
+    const backend = cfg.output.backend;
+    const exclusive = bitPerfect || cfg.output.exclusive || (backend !== "coreaudio" && rate > 48000);
     // WASAPI shared mode often rejects 32-bit WAVEFORMATEXTENSIBLE even when
     // the device advertises it; 16-bit is universally accepted by the mixer.
     const bits = bitPerfect
       ? Math.max(16, Math.min(32, Number(msg.bits || 16)))
-      : exclusive
-        ? (cfg.output.bitDepth === "auto" ? 32 : Number(cfg.output.bitDepth))
-        : 16;
+      : backend === "coreaudio" || backend === "asio"
+        ? 32
+        : exclusive
+          ? (cfg.output.bitDepth === "auto" ? 32 : Number(cfg.output.bitDepth))
+          : 16;
     const sampleFormat = bitPerfect
       ? (bits === 16 ? "s16le" : bits === 24 ? "s24le" : "s32le")
-      : exclusive
-        ? (cfg.output.sampleFormat === "auto" ? "f32le" : cfg.output.sampleFormat)
-        : "s16le";
+      : backend === "coreaudio"
+        ? "f32le"
+        : exclusive
+          ? (cfg.output.sampleFormat === "auto" ? "f32le" : cfg.output.sampleFormat)
+          : "s16le";
     await this.stopNative();
     if (token !== this.nativeBeginToken) return;
     this.nativeSongId = msg.songId;
@@ -1352,8 +1376,7 @@ export class PlayerService implements vscode.Disposable {
     this.nativeExpectedFrames = msg.length;
     this.nativeStartPosition = this.position;
     this.finishedNative = false;
-    const backend = cfg.output.backend === "asio" ? "asio" : "wasapi";
-    const device = backend === "asio" ? (cfg.output.device?.startsWith("asio:") ? cfg.output.device : "default") : (cfg.output.device && !cfg.output.device.startsWith("asio:") ? cfg.output.device : "default");
+    const device = this.nativeDevice(backend, cfg.output.device);
     log.info("native configure", { backend, device, rate, bits, sampleFormat, exclusive, bufferMs: Math.max(40, cfg.output.bufferMs), volume: this.volume });
     const options = {
       device,
@@ -1393,7 +1416,7 @@ export class PlayerService implements vscode.Disposable {
       session.on("log", (line) => log.warn("native stderr", line));
       session.on("engineError", (err) => log.warn("native engine error", err.message));
       const event = session.configured;
-      log.info("native device", { name: event?.device?.name ?? event?.device?.id ?? "default", backend: event?.device?.backend ?? "wasapi", bufferFrames: event?.bufferFrames });
+      log.info("native device", { name: event?.device?.name ?? event?.device?.id ?? "default", backend: event?.device?.backend ?? backend, bufferFrames: event?.bufferFrames });
       const format: AudioFormat =
         event?.format ?? ({ sampleRate: rate, channels: msg.channels, bits, sampleFormat } as AudioFormat);
       this.nativeRate = format.sampleRate;

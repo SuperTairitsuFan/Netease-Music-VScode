@@ -2,6 +2,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { EventEmitter } from "node:events";
 import * as fs from "node:fs/promises";
 import type { AudioFormat, ComponentRecord } from "./components";
+import { defaultNativeBackend, type NativeBackend } from "../config";
 import { log } from "../util/logger";
 
 export const FRAME_CONTROL = 1;
@@ -79,7 +80,7 @@ export class NativeEngineSession extends EventEmitter {
     });
   }
 
-  static async start(binary: string, options: EngineConfigureOptions, backend?: "wasapi" | "asio"): Promise<NativeEngineSession> {
+  static async start(binary: string, options: EngineConfigureOptions, backend?: NativeBackend): Promise<NativeEngineSession> {
     const stat = await fs.stat(binary).catch(() => null);
     if (!stat?.isFile()) throw new Error(`原生引擎不存在：${binary}`);
     const args = backend ? ["--serve", "--backend", backend] : ["--serve"];
@@ -112,7 +113,7 @@ export class NativeEngineSession extends EventEmitter {
   static async startFile(
     binary: string,
     filePath: string,
-    backend: "wasapi" | "asio",
+    backend: NativeBackend,
     startMs: number,
     growing = false,
     donePath = "",
@@ -377,7 +378,11 @@ export class EngineError extends Error {
   }
 }
 
-export async function probeEngine(binary: string, backend: "wasapi" | "asio" = "wasapi", timeoutMs = 15000): Promise<EngineProbe> {
+export async function probeEngine(
+  binary: string,
+  backend: NativeBackend = defaultNativeBackend(),
+  timeoutMs = 15000,
+): Promise<EngineProbe> {
   try {
     const stat = await fs.stat(binary);
     if (!stat.isFile()) return { ok: false, error: "组件入口不是文件" };

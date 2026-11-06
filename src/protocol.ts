@@ -133,7 +133,7 @@ export interface SettingsView {
   bitPerfect: boolean;
   persistentSeek: boolean;
   hrtf: boolean;
-  nativeBackend: "wasapi" | "asio";
+  nativeBackend: "wasapi" | "asio" | "alsa" | "coreaudio";
   bufferMs: number;
   volume: number;
   mode: string;

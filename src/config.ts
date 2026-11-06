@@ -5,6 +5,24 @@ import * as vscode from "vscode";
 export type Quality = "standard" | "exhigh" | "lossless" | "hires" | "jyeffect" | "sky" | "jymaster";
 export type OutputMode = "auto" | "webaudio" | "native";
 export type PlayMode = "order" | "repeat" | "repeatOne" | "shuffle";
+export type NativeBackend = "wasapi" | "asio" | "alsa" | "coreaudio";
+
+/** Platform default for the native audio engine backend. */
+export function defaultNativeBackend(platform = process.platform): NativeBackend {
+  if (platform === "darwin") return "coreaudio";
+  if (platform === "linux") return "alsa";
+  return "wasapi";
+}
+
+/**
+ * Keep settings.json portable across machines: a backend saved on Windows
+ * must not be sent to a macOS engine (and vice versa).
+ */
+export function normalizeNativeBackend(value: string | undefined, platform = process.platform): NativeBackend {
+  const allowed: NativeBackend[] =
+    platform === "win32" ? ["wasapi", "asio"] : platform === "darwin" ? ["coreaudio"] : ["alsa"];
+  return allowed.includes(value as NativeBackend) ? (value as NativeBackend) : defaultNativeBackend(platform);
+}
 
 export interface MusicConfig {
   output: {
@@ -16,7 +34,7 @@ export interface MusicConfig {
     exclusive: boolean;
     bufferMs: number;
     bitPerfect: boolean;
-    backend: "wasapi" | "asio";
+    backend: NativeBackend;
     persistentSeek: boolean;
     hrtf: boolean;
     streaming: boolean;
@@ -159,7 +177,7 @@ export function getConfig(): MusicConfig {
       exclusive: c.get<boolean>("output.exclusive") ?? false,
       bufferMs: c.get<number>("output.bufferMs") ?? 10,
       bitPerfect: c.get<boolean>("output.bitPerfect") ?? false,
-      backend: c.get<string>("output.backend") === "asio" ? "asio" : "wasapi",
+      backend: normalizeNativeBackend(c.get<string>("output.backend")),
       persistentSeek: c.get<boolean>("output.persistentSeek") ?? false,
       hrtf: c.get<boolean>("output.hrtf") ?? false,
       streaming: c.get<boolean>("output.streaming") ?? true,
