@@ -14,6 +14,7 @@
 extern const NaoeBackend naoe_alsa_backend;
 extern const NaoeBackend naoe_wasapi_backend;
 extern const NaoeBackend naoe_asio_backend;
+extern const NaoeBackend naoe_coreaudio_backend;
 extern const NaoeBackend naoe_null_backend;
 
 void naoe_json_escape(const char *input, char *output, size_t output_len) {
@@ -74,8 +75,10 @@ void naoe_sleep_ms(int ms) {
 
 int naoe_backend_select(const char *name, const NaoeBackend **out) {
   if (!name || !*name) {
-#ifdef _WIN32
+#if defined(_WIN32)
     *out = &naoe_wasapi_backend;
+#elif defined(__APPLE__)
+    *out = &naoe_coreaudio_backend;
 #else
     *out = &naoe_alsa_backend;
 #endif
@@ -95,6 +98,10 @@ int naoe_backend_select(const char *name, const NaoeBackend **out) {
   }
   if (strcmp(name, "asio") == 0) {
     *out = &naoe_asio_backend;
+    return 0;
+  }
+  if (strcmp(name, "coreaudio") == 0) {
+    *out = &naoe_coreaudio_backend;
     return 0;
   }
   return -1;

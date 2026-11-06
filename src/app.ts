@@ -45,9 +45,12 @@ import type {
 } from "./api/types";
 import {
   defaultCacheDir,
+  defaultNativeBackend,
   getConfig,
+  normalizeNativeBackend,
   QUALITY_LABELS,
   QUALITY_OPTIONS,
+  type NativeBackend,
   type Quality,
 } from "./config";
 import { DownloadManager } from "./download/downloader";
@@ -2754,18 +2757,32 @@ export class App implements vscode.Disposable {
 
   private restartApp(): void {
     const exe = process.execPath;
-    log.info("restart app", { exe });
+    log.info("restart app", { exe, platform: process.platform });
     try {
       // The old instance is still running when this is spawned. Wait a few
-      // seconds after quitting, then launch a fresh Code process. Using cmd
-      // start detaches the new process from the extension-host job object.
-      const command = `ping -n 4 127.0.0.1 >nul & start "" "${exe}"`;
-      const child = spawn(process.env.ComSpec ?? "cmd.exe", ["/d", "/s", "/c", command], {
-        detached: true,
-        windowsHide: true,
-        stdio: "ignore",
-      });
-      child.unref();
+      // seconds after quitting, then launch a fresh Code process.
+      if (process.platform === "win32") {
+        const command = `ping -n 4 127.0.0.1 >nul & start "" "${exe}"`;
+        const child = spawn(process.env.ComSpec ?? "cmd.exe", ["/d", "/s", "/c", command], {
+          detached: true,
+          windowsHide: true,
+          stdio: "ignore",
+        });
+        child.unref();
+      } else if (process.platform === "darwin") {
+        // appRoot is <bundle>.app/Contents/Resources/app; relaunch the whole
+        // bundle, not the helper executable.
+        const bundle = path.resolve(vscode.env.appRoot, "../../..");
+        const args = bundle.endsWith(".app") ? ["-n", bundle] : ["-n", "-a", vscode.env.appName];
+        const child = spawn("/bin/sh", ["-c", `sleep 2; open ${args.map((part) => `"${part}"`).join(" ")}`], {
+          detached: true,
+          stdio: "ignore",
+        });
+        child.unref();
+      } else {
+        const child = spawn("/bin/sh", ["-c", `sleep 2; "${exe}"`], { detached: true, stdio: "ignore" });
+        child.unref();
+      }
     } catch (err) {
       log.warn("restart spawn failed", (err as Error).message);
     }
@@ -2779,15 +2796,14 @@ export class App implements vscode.Disposable {
     if (!record?.entryPath || record.status !== "ready") {
       throw new Error("原生引擎未安装或未启用，请先在设置 → 组件中安装并启用");
     }
-    const [wasapiProbe, asioProbe] = await Promise.all([
-      probeEngine(record.entryPath, "wasapi"),
-      probeEngine(record.entryPath, "asio"),
-    ]);
+    const backends: NativeBackend[] =
+      process.platform === "win32" ? ["wasapi", "asio"] : process.platform === "darwin" ? ["coreaudio"] : ["alsa"];
+    const results = await Promise.all(backends.map((backend) => probeEngine(record.entryPath!, backend)));
     const probe: EngineProbe = {
-      ...wasapiProbe,
-      ok: wasapiProbe.ok || asioProbe.ok,
-      devices: [...(wasapiProbe.devices ?? []), ...(asioProbe.devices ?? [])],
-      backends: [...new Set([...(wasapiProbe.backends ?? []), ...(asioProbe.backends ?? [])])],
+      ...results[0],
+      ok: results.some((result) => result.ok),
+      devices: results.flatMap((result) => result.devices ?? []),
+      backends: [...new Set(results.flatMap((result) => result.backends ?? []))],
     };
     this.probeCache = { path: record.entryPath, probe, at: Date.now() };
     await this.autoConfigureOutput(probe);
@@ -2807,7 +2823,8 @@ export class App implements vscode.Disposable {
       const configuration = vscode.workspace.getConfiguration("neteaseMusic");
       const cfg = getConfig();
       const hasAsio = devices.some((device) => device.backend === "asio");
-      const backend = cfg.output.backend === "asio" && !hasAsio ? "wasapi" : cfg.output.backend;
+      const configured = normalizeNativeBackend(cfg.output.backend);
+      const backend = configured === "asio" && !hasAsio ? defaultNativeBackend() : configured;
       if (!this.outputAutoInitialized) this.outputAutoInitialized = true;
       const backendDevices = devices.filter((device) => device.backend === backend);
       const defaultDevice = backendDevices.find((device) => device.isDefault) ?? backendDevices[0];
@@ -2826,14 +2843,14 @@ export class App implements vscode.Disposable {
     const probe = await this.probeAudio(false);
     const devices = probe.devices ?? [];
     const currentBackend = getConfig().output.backend;
-    const items: Array<vscode.QuickPickItem & { deviceId: string; backend?: "wasapi" | "asio" }> = [
+    const items: Array<vscode.QuickPickItem & { deviceId: string; backend?: NativeBackend }> = [
       { label: "$(home) 系统默认设备", description: "由操作系统选择默认端点", deviceId: "default" },
       ...devices.map((device) => ({
         label: `$(device-desktop) ${device.name}`,
         description: `${device.backend}${device.isDefault ? " · 默认" : ""}${device.backend === currentBackend ? " · 当前后端" : ""}`,
         detail: device.formats.map((format) => `${format.sampleRate / 1000} kHz/${format.bits} bit`).join(" · "),
         deviceId: device.id,
-        backend: device.backend === "asio" ? "asio" as const : "wasapi" as const,
+        backend: device.backend as NativeBackend,
       })),
     ];
     const picked = await vscode.window.showQuickPick(items, {
@@ -2849,8 +2866,11 @@ export class App implements vscode.Disposable {
       const chosen = devices.find((device) => device.id === picked.deviceId);
       const bluetooth = Boolean(chosen && /bluetooth|蓝牙|hands-free|airpods|buds|wh-1000|wf-1000/i.test(chosen.name));
       await configuration.update("output.mode", bluetooth ? "webaudio" : "native", vscode.ConfigurationTarget.Global);
-      await configuration.update("output.exclusive", !bluetooth, vscode.ConfigurationTarget.Global);
-      await configuration.update("output.bitPerfect", !bluetooth, vscode.ConfigurationTarget.Global);
+      // CoreAudio has no WASAPI-style exclusive format negotiation; leave the
+      // stricter switches off by default so device selection never goes silent.
+      const strict = !bluetooth && process.platform !== "darwin";
+      await configuration.update("output.exclusive", strict, vscode.ConfigurationTarget.Global);
+      await configuration.update("output.bitPerfect", strict, vscode.ConfigurationTarget.Global);
       if (!bluetooth) await configuration.update("output.hrtf", false, vscode.ConfigurationTarget.Global);
     } finally {
       this.autoConfiguring = false;

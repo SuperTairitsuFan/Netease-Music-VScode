@@ -56,6 +56,29 @@ const TARGETS = {
     libs: ["-lole32", "-luuid", "-loleaut32", "-lavrt", "-ladvapi32", "-lgdi32"],
     cflags: ["-I", path.join(root, "native/src"), "-I", path.join(root, "native/third_party/asio"), "-I", path.join(root, "native/third_party/dr_libs")],
   },
+  // macOS targets are compiled with the system clang + Xcode Command Line
+  // Tools: the AudioToolbox/CoreAudio frameworks cannot be linked by zig's
+  // bundled cross toolchain without a macOS SDK.
+  "darwin-arm64": {
+    compiler: "clang",
+    platform: "darwin",
+    arch: "arm64",
+    backend: "coreaudio",
+    entry: "native-audio-output",
+    archFlag: "arm64",
+    libs: ["-framework", "AudioToolbox", "-framework", "CoreAudio", "-framework", "CoreFoundation", "-lm", "-lpthread"],
+    cflags: ["-mmacosx-version-min=11.0", "-I", path.join(root, "native/src"), "-I", path.join(root, "native/third_party/dr_libs")],
+  },
+  "darwin-x64": {
+    compiler: "clang",
+    platform: "darwin",
+    arch: "x64",
+    backend: "coreaudio",
+    entry: "native-audio-output",
+    archFlag: "x86_64",
+    libs: ["-framework", "AudioToolbox", "-framework", "CoreAudio", "-framework", "CoreFoundation", "-lm", "-lpthread"],
+    cflags: ["-mmacosx-version-min=11.0", "-I", path.join(root, "native/src"), "-I", path.join(root, "native/third_party/dr_libs")],
+  },
 };
 
 const FORMATS = [
@@ -181,26 +204,50 @@ function build(targetName, zig) {
     .filter((file) => file.endsWith(".c"))
     .map((file) => path.join("native/src", file));
 
-  const args = [
-    "cc",
-    "-target",
-    target.triple,
-    "-O2",
-    "-s",
-    "-std=c11",
-    "-Wall",
-    "-Wextra",
-    "-Wno-unused-parameter",
-    ...target.cflags,
-    "-o",
-    outFile,
-    ...sources,
-    ...target.libs,
-  ];
-  console.log(`[build-native] ${targetName} (${target.triple})`);
-  const result = spawnSync(zig.bin, args, { cwd: root, stdio: "inherit" });
+  const darwin = target.platform === "darwin";
+  const compiler = darwin ? "clang" : zig.bin;
+  const args = darwin
+    ? [
+        "-O2",
+        "-s",
+        "-std=c11",
+        "-Wall",
+        "-Wextra",
+        "-Wno-unused-parameter",
+        "-arch",
+        target.archFlag,
+        ...target.cflags,
+        "-o",
+        outFile,
+        ...sources,
+        ...target.libs,
+      ]
+    : [
+        "cc",
+        "-target",
+        target.triple,
+        "-O2",
+        "-s",
+        "-std=c11",
+        "-Wall",
+        "-Wextra",
+        "-Wno-unused-parameter",
+        ...target.cflags,
+        "-o",
+        outFile,
+        ...sources,
+        ...target.libs,
+      ];
+  console.log(`[build-native] ${targetName} (${darwin ? target.archFlag : target.triple})`);
+  const result = spawnSync(compiler, args, { cwd: root, stdio: "inherit" });
   if (result.status !== 0) throw new Error(`编译失败：${targetName}`);
   fs.chmodSync(outFile, 0o755);
+  if (darwin) {
+    // Apple Silicon refuses unsigned arm64 binaries. Ad-hoc signing keeps the
+    // locally built component runnable without a Developer ID certificate.
+    const signed = spawnSync("codesign", ["--force", "--sign", "-", outFile], { stdio: "inherit" });
+    if (signed.status !== 0) console.warn(`[build-native] codesign 失败（二进制仍可尝试运行）：${targetName}`);
+  }
 
   const manifest = {
     schemaVersion: 1,
@@ -217,7 +264,9 @@ function build(targetName, zig) {
     description:
       target.platform === "win32"
         ? "WASAPI（Shared / Exclusive）原生输出，独占模式支持设备能力内的 PCM 格式。"
-        : "ALSA 直连 / PipeWire 原生输出；设备为 hw: 时直连硬件，default 走系统音频服务。",
+        : target.platform === "darwin"
+          ? "CoreAudio（HAL AudioUnit）原生输出；支持设备选择与 Hog Mode 独占。"
+          : "ALSA 直连 / PipeWire 原生输出；设备为 hw: 时直连硬件，default 走系统音频服务。",
     formats: FORMATS.map(([sampleRate, bits]) => ({
       sampleRate,
       bits,
@@ -244,6 +293,10 @@ function build(targetName, zig) {
 
 const requested = process.argv.slice(2).filter((arg) => !arg.startsWith("-"));
 const names = requested.length ? requested : Object.keys(TARGETS);
-const zig = findZig();
-console.log(`[build-native] zig ${zig.version} (${zig.bin})`);
+for (const name of names) {
+  if (!TARGETS[name]) throw new Error(`未知目标：${name}，可选：${Object.keys(TARGETS).join(", ")}`);
+}
+const needsZig = names.some((name) => TARGETS[name].platform !== "darwin");
+const zig = needsZig ? findZig() : { bin: null, version: "" };
+if (needsZig) console.log(`[build-native] zig ${zig.version} (${zig.bin})`);
 for (const name of names) build(name, zig);

@@ -1167,3 +1167,12 @@
 
 - 限制播放 URL 缓存（64）、歌词缓存（80）和歌单详情缓存（3），避免长时间使用后无限增长。
 - 本地版本，未上传 GitHub/Marketplace。
+
+## macOS 适配（基于 v1.0.83）
+
+- 新增 CoreAudio（HAL AudioUnit）原生音频后端：设备探测、设备 UID 选择、Hog Mode 独占、音量、暂停、seek、drain。
+- 新增 `darwin-arm64` / `darwin-x64` 原生构建与 VSIX 打包目标，macOS 使用系统 clang 与 AudioToolbox / CoreAudio 框架。
+- 扩展按平台自动选择后端：Windows WASAPI / ASIO、macOS CoreAudio、Linux ALSA，并修正跨平台 settings.json 中不匹配的 `output.backend`。
+- 设置面板增加 macOS CoreAudio 后端、独占模式说明与故障排查；桌面歌词悬浮窗在 macOS 标记为暂不支持。
+- 修复 `fonts.c` 在非 Windows 平台无条件包含 `windows.h` 导致 macOS 编译失败的问题。
+- 本地构建，未上传 GitHub/Marketplace。

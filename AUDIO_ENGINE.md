@@ -288,3 +288,22 @@ native pcm int { seq, bytes, bits, frames }
 - DSD 未实现；
 - 32-bit 源在 Webview 解码路径中会经过 float32，流式路径不受影响；
 - ASIO COM 驱动行为依赖厂商实现，代码已按 Thesycon 常见约定处理。
+
+## 10. CoreAudio（macOS）
+
+macOS 使用 HAL Output AudioUnit，而不是 WASAPI / ALSA：
+
+```text
+stdin PCM（float32 或整数）
+  → 引擎泵线程转换并写入 SPSC 环形缓冲
+  → AudioUnit 渲染回调（实时线程）读取环形缓冲
+  → CoreAudio HAL → 设备
+```
+
+- 设备 ID 使用稳定的 CoreAudio UID（探测结果里的 `id`），`default` 表示系统默认输出。
+- `exclusive=1` 时尝试 `kAudioDevicePropertyHogMode` 独占设备；设备不允许或失败时继续共享输出。
+- 仅在独占且格式设置失败时尝试修改设备标称采样率，关闭时恢复原值。
+- 引擎端实际格式支持 `f32le`、`s16le`、`s32le`；24-bit 整数 PCM 以 int32 容器高位对齐传输，CoreAudio 侧按 32-bit 整数输出。
+- 渲染回调不分配内存、不加锁；生产端在环满时短暂休眠。
+- macOS 的共享混音链路不保证 bit-perfect；需要严格验证时请使用支持 Hog Mode 的外接 DAC 并自行测量。
+- 探测设备格式时读取 `kAudioDevicePropertyAvailableNominalSampleRates` 与输出流声道数，不修改设备状态。
