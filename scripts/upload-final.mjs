@@ -41,7 +41,7 @@ function walk(dir, out = []) {
 }
 
 const top = ["README.md", "VERSION_CHANGES.md", "package.json", "package-lock.json", "esbuild.mjs", "tsconfig.json"];
-const dirs = ["src", "native/src", "scripts", "test", ".github/workflows"];
+const dirs = ["src", "native/src", "scripts", "test"];
 const files = [...top.filter((file) => fs.existsSync(file)), ...dirs.flatMap((dir) => fs.existsSync(dir) ? walk(dir) : [])]
   .filter((file) => !file.includes("upload-github"));
 
