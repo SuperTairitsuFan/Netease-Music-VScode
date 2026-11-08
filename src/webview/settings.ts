@@ -228,6 +228,15 @@ function onClick(event: Event): void {
     case "installComponent":
       send("installComponent");
       break;
+    case "moveSortPriority":
+      send("moveSortPriority", { key: el.dataset.key, direction: Number(el.dataset.direction ?? 0) });
+      break;
+    case "resetImmersive":
+      send("resetImmersive");
+      break;
+    case "resetHeadset":
+      send("resetHeadset");
+      break;
     case "refreshComponents":
       send("refreshComponents");
       break;
@@ -286,6 +295,19 @@ function onChange(event: Event): void {
   if (target.dataset.shortcut) {
     const suffix = target.dataset.scope === "global" ? "Global" : "";
     send("setShortcut", { id: `${target.dataset.shortcut}${suffix}`, value: target.value });
+    return;
+  }
+  if (target.dataset.sidebarKey) {
+    send("setSidebarItem", { key: target.dataset.sidebarKey, visible: (target as HTMLInputElement).checked });
+    return;
+  }
+  if (target.dataset.headsetIndex) {
+    const payload: Record<string, unknown> = { index: Number(target.dataset.headsetIndex) };
+    const field = target.dataset.headsetField;
+    if (field === "count") payload.count = Number(target.value);
+    else if (field === "type") payload.type = target.value;
+    else if (field === "action") payload.action = target.value;
+    send("setHeadsetGesture", payload);
     return;
   }
   if (!target.dataset.config) return;
@@ -359,9 +381,11 @@ function renderAccount(): string {
   const cacheCard = `<div class="set-card"><div class="set-card-head"><div class="t">音频缓存</div><div class="d">播放缓存、容量与目录</div></div>
     <div class="set-row"><div><div class="label">当前缓存</div><div class="hint">${st ? `${st.cacheFiles} 首 · ${mb(st.cacheBytes)}` : "读取中"}</div></div><div class="control"><button class="btn small danger" data-act="clearCache">清除缓存</button><button class="btn small" data-act="openDir" data-dir="cache">打开目录</button></div></div>
     ${switchRow("启用音频缓存", "关闭后播放、切换歌曲和进度跳转需要重新下载，无法即点即播；使用原生引擎时不可修改，WebAudio 下可关闭。", "cache.enabled", cfg.cacheEnabled, cfg.cacheLocked)}
+    ${switchRow("开启歌单缓存", "启用后在缓存目录下创建 library 目录，保存每日推荐和喜欢/收藏歌曲表格；关闭时直接使用网络数据。", "cache.libraryEnabled", cfg.libraryCacheEnabled)}
+    <div class="set-row"><div><div class="label">歌单缓存文件</div><div class="hint">推荐缓存：netease-recommend.json · 歌单表格：netease-favorites.csv / netease-library.csv</div></div><div class="control"><button class="btn small" data-act="refreshRecommendCache">刷新推荐缓存</button><button class="btn small" data-act="refreshLibraryCache">刷新歌单缓存</button></div></div>
     ${cacheConfirm ? '<div class="set-row"><div><div class="label">确认清除音频缓存？</div><div class="hint">将删除当前缓存目录内的全部音频与 .part 文件，正在播放的文件可能被占用。</div></div><div class="control"><button class="btn small danger" data-act="cacheClearConfirm">确定清除</button><button class="btn small" data-act="cacheClearCancel">取消</button></div></div>' : ""}
     <div class="set-row"><div><div class="label">缓存上限</div><div class="hint">超出后按最近最少使用清理</div></div><div class="control"><input type="number" min="64" value="${cfg.cacheMaxSizeMB}" data-config="cache.maxSizeMB" style="width:100px" /> MB</div></div>
-    <div class="set-row"><div><div class="label">缓存目录</div><div class="hint">${esc(cfg.cacheDir)}</div></div><div class="control"><button class="btn small" data-act="chooseDir" data-key="cache.dir">${icon("folder", 11)} 更改目录</button></div></div>
+    <div class="set-row"><div><div class="label">缓存目录</div><div class="hint">${esc(cfg.cacheDir)}<br>歌曲文件实际保存在所选目录的 songs 子目录</div></div><div class="control"><button class="btn small" data-act="chooseDir" data-key="cache.dir">${icon("folder", 11)} 更改目录</button></div></div>
   </div>`;
   if (!account) {
   return `<div class="set-card"><div class="set-card-head"><div class="t">账号</div><div class="d">当前插件版本 v${esc(settings?.version ?? "")}</div><div class="d">登录后可同步歌单、收藏与会员音质</div></div>
@@ -426,6 +450,32 @@ function renderGeneral(): string {
   </div>`;
 }
 
+function outputChainCard(): string {
+  const output = state?.output;
+  const actual = state?.actualQuality || settings?.quality || "";
+  const nativeOut = output?.kind === "native";
+  const format = output?.format;
+  const formatText = format ? `${(format.sampleRate / 1000).toFixed(1)} kHz · ${format.bits} bit · ${format.channels} ch` : "";
+  const backend = (output?.backend ?? settings?.nativeBackend ?? "wasapi").toUpperCase();
+  const source = output?.kind === "none"
+    ? esc(output.detail || "未开始播放")
+    : actual === "local" ? "本地文件 · 直接读取" : `网易云流 · ${esc(QUALITY_TEXT_FALLBACK(actual))}`;
+  const decode = nativeOut ? "Native Engine 解码 → PCM" : "Chromium / WebAudio 解码 → PCM";
+  const out = nativeOut ? `${backend} · ${formatText || output?.detail || "原生输出"}` : "WebAudio 共享输出";
+  const device = output?.deviceName || (settings?.device && settings.device !== "default" ? settings.device : "系统默认输出设备");
+  return `<div class="set-card"><div class="set-card-head"><div class="t">输出链路</div><div class="d">实时读取当前播放路径${output?.kind === "none" ? " · 未播放" : ""}</div></div>
+    <div class="set-row stack"><div class="control" style="display:block"><div class="chain">
+      <div class="node active">${source}</div>
+      <div class="arrow">▼</div>
+      <div class="node">${decode}</div>
+      <div class="arrow">▼</div>
+      <div class="node ${nativeOut ? "active" : ""}">${out}<div class="chain-sub">${esc(output?.detail ?? "")}</div></div>
+      <div class="arrow">▼</div>
+      <div class="node">${esc(device)}<div class="chain-sub">${nativeOut ? "WASAPI / ASIO 端点" : "系统共享混音器 · Chromium 输出"}</div></div>
+    </div></div></div>
+  </div>`;
+}
+
 function renderSystem(): string {
   const cfg = settings!;
   const isLinux = state?.platform === "linux";
@@ -442,16 +492,16 @@ function renderSystem(): string {
   const sampleFormats = ["auto", "s16le", "s24le", "s32le", "f32le"];
   return `<div class="set-card"><div class="set-card-head"><div class="t">音频输出</div><div class="d">原生引擎由独立组件提供，可启用 / 禁用 / 卸载</div></div>
     ${isLinux ? `<div class="set-row"><div><div class="label">Linux 支持</div><div class="hint">当前 Linux 使用 ALSA 原生输出；WASAPI / ASIO 为 Windows 专用，ASIO 选项不可用。请等后续完善。</div></div></div>` : ""}
-    ${selectRow("输出模式", bluetooth ? "蓝牙设备默认使用 WebAudio，原生引擎暂不可选" : "默认 WebAudio；native 强制原生，失败不回退", "output.mode", cfg.outputMode, [
+    ${selectRow("输出模式", bluetooth ? "蓝牙可使用原生 WASAPI 共享模式；独占和 Bit-perfect 不可用" : "默认 WebAudio；native 强制原生，失败不回退", "output.mode", cfg.outputMode, [
       { value: "auto", label: "自动（优先 WebAudio，开箱即用）" },
       { value: "webaudio", label: "仅 WebAudio（免驱动，可能被浏览器拦截）" },
-      { value: "native", label: "仅原生引擎（独占，需组件）", disabled: bluetooth },
+      { value: "native", label: "仅原生引擎（蓝牙建议 WASAPI 共享）" },
     ])}
     <div class="set-row"><div><div class="label">输出设备</div><div class="hint">${esc(selectedDevice?.name ?? (cfg.device || "系统默认设备"))}${bluetooth ? " · 蓝牙设备" : ""}</div></div><div class="control"><button class="btn small" data-act="probeAudio">${icon("pulse", 11)} 探测</button><button class="btn small" data-act="selectDevice">${icon("device", 11)} 选择设备</button></div></div>
-    ${selectRow("原生后端", isLinux ? "当前 Linux 不支持 ASIO，请等后续完善" : bluetooth ? "蓝牙设备固定使用 WebAudio，原生后端不可选" : hasAsio ? "检测到 ASIO 驱动，可手动选择；默认使用 WASAPI" : "未检测到 ASIO 驱动，只能使用 WASAPI", "output.backend", cfg.nativeBackend, [
-      { value: "wasapi", label: "WASAPI（兼容好，支持独占模式）" },
+    ${selectRow("原生后端", isLinux ? "当前 Linux 不支持 ASIO，请等后续完善" : hasAsio ? "检测到 ASIO 驱动，可手动选择；默认使用 WASAPI" : "未检测到 ASIO 驱动，只能使用 WASAPI", "output.backend", cfg.nativeBackend, [
+      { value: "wasapi", label: "WASAPI（兼容好，支持共享/独占）" },
       { value: "asio", label: "ASIO（需厂商驱动）", disabled: !hasAsio || isLinux },
-    ], bluetooth)}
+    ])}
     <div class="set-row"><div><div class="label">怎么选</div><div class="hint">默认使用 WebAudio；原生后端默认 WASAPI。检测到 ASIO 驱动后可手动选择 ASIO。独占、Bit-perfect 与长驻 seek 默认关闭。</div></div></div>
     <div class="set-row"><div><div class="label">重启 VS Code</div><div class="hint">关闭所有 VS Code 窗口后自动重新启动，组件/设置改动会生效</div></div><div class="control"><button class="btn small" data-act="restartApp">重启生效</button></div></div>
     ${switchRow("独占模式", bluetooth ? "蓝牙设备默认使用 WebAudio，独占模式不可用" : "Windows WASAPI Exclusive / Linux ALSA hw: 直连，绕过系统混音器", "output.exclusive", cfg.exclusive, bluetooth)}
@@ -475,21 +525,12 @@ function renderSystem(): string {
     <div class="set-row"><div><div class="label">ASIO 无声、打开失败或被占用</div><div class="hint">关闭其他正在独占声卡的软件；仍失败时改用 WASAPI。ASIO 同时只能被一个程序占用。</div></div></div>
     <div class="set-row"><div><div class="label">WASAPI 无法播放</div><div class="hint">关闭“独占模式”和“Bit-perfect”，把输出模式改为 WebAudio 后重新播放；如果恢复，说明设备的独占格式不可用。</div></div></div>
     <div class="set-row"><div><div class="label">采样率或位深不支持</div><div class="hint">把采样率、位深、样本格式都改为 auto；仍失败时把位深改为 16 bit，或切换 WASAPI。</div></div></div>
-    <div class="set-row"><div><div class="label">蓝牙耳机无声</div><div class="hint">蓝牙通常只能使用 WebAudio；不要开启独占或 Bit-perfect。设备切换后重新选择蓝牙端点。</div></div></div>
+    <div class="set-row"><div><div class="label">蓝牙耳机无声</div><div class="hint">蓝牙可以使用原生 WASAPI 共享模式；不要开启独占或 Bit-perfect。设备切换后重新选择蓝牙端点。</div></div></div>
     <div class="set-row"><div><div class="label">拔掉 DAC 后列表还有旧设备</div><div class="hint">重新插拔后点“探测”，再选择当前存在的设备；不要继续使用已拔掉的 ASIO/WASAPI ID。</div></div></div>
     <div class="set-row"><div><div class="label">进度条不走或一直无声</div><div class="hint">关闭其他播放器释放独占；仍卡住时退出所有 VS Code 窗口后重开，并清除残留缓存。</div></div></div>
   </div>
-  <div class="set-card"><div class="set-card-head"><div class="t">输出链路</div><div class="d">当前实际路径</div></div>
-    <div class="set-row stack"><div class="control" style="display:block"><div class="chain">
-      <div class="node active">网易云流 · ${esc(QUALITY_TEXT_FALLBACK(settings?.quality ?? ""))}</div>
-      <div class="arrow">▼</div>
-      <div class="node">解码 · ${native.ready ? "Webview 解码 → PCM" : "Chromium 解码"}</div>
-      <div class="arrow">▼</div>
-      <div class="node ${native.ready ? "active" : ""}">${native.ready ? `Native Engine · ${esc(native.backend ?? "")}` : "WebAudio（共享 48 kHz）"}</div>
-      <div class="arrow">▼</div>
-      <div class="node">物理 DAC / USB 耳机</div>
-    </div></div></div>
-  </div>`;
+  ${outputChainCard()}
+`;
 }
 
 function QUALITY_TEXT_FALLBACK(value: string): string {
@@ -567,16 +608,11 @@ function renderQuality(): string {
 }
 
 function componentCard(item: ComponentView): string {
-  const status =
-    item.status === "ready" ? "就绪" : item.status === "disabled" ? "已禁用" : item.status === "invalid" ? "异常" : item.status === "removed" ? "已移除" : "不兼容";
+  const status = item.kind === "builtin"
+    ? "就绪"
+    : item.status === "ready" ? "就绪" : item.status === "disabled" ? "已禁用" : item.status === "invalid" ? "异常" : item.status === "removed" ? "已移除" : "不兼容";
   const actions: string[] = [];
-  if (item.kind === "builtin") {
-    actions.push(
-      item.enabled
-        ? `<button class="btn small" data-act="disableComponent" data-id="${esc(item.id)}">禁用</button>`
-        : `<button class="btn small primary" data-act="enableComponent" data-id="${esc(item.id)}">启用</button>`,
-    );
-  } else if (item.removable) {
+  if (item.kind !== "builtin" && item.removable) {
     actions.push(
       item.enabled
         ? `<button class="btn small" data-act="disableComponent" data-id="${esc(item.id)}">禁用</button>`
@@ -601,6 +637,69 @@ function fontOptions(current: string, key: string): string {
   return '<select data-config="' + key + '">' + list.map((name) => '<option value="' + esc(name) + '"' + (name === current ? ' selected' : '') + '>' + esc(name) + '</option>').join("") + '</select>';
 }
 
+function sidebarItemRows(): string {
+  const items: Array<[string, string]> = [
+    ["account", "账号详细"],
+    ["recommend", "推荐"], ["featured", "精选"], ["podcast", "播客"], ["roam", "漫游"],
+    ["following", "关注"], ["friends", "好友"], ["all", "全部音乐"], ["liked", "我喜欢的音乐"],
+    ["recent", "最近播放"], ["collections", "我的收藏"], ["downloads", "下载管理"],
+    ["local", "本地音乐"], ["cloud", "我的音乐网盘"], ["created", "创建的歌单"], ["subscribed", "收藏的歌单"],
+  ];
+  const visible = new Set(state?.sidebarVisible ?? items.map(([key]) => key));
+  return `<div class="set-card headless" style="margin:0;border:0;border-top:1px solid var(--border);border-radius:0"><div class="set-card-head"><div class="t">侧边栏按钮</div><div class="d">勾选后在侧边栏显示；取消勾选即隐藏</div></div>
+    <div class="sidebar-toggle-grid">${items.map(([key, label]) => `<label class="sidebar-toggle"><span><span class="sidebar-toggle-label">${label}</span><span class="sidebar-toggle-key">${key}</span></span><input type="checkbox" data-sidebar-key="${key}" ${visible.has(key) ? "checked" : ""} /></label>`).join("")}</div>
+  </div>`;
+}
+
+function headsetRows(): string {
+  const gestures = state?.headsetGestures ?? [
+    { type: "clicks", count: 1, action: "toggle" },
+    { type: "clicks", count: 2, action: "next" },
+    { type: "clicks", count: 3, action: "previous" },
+    { type: "long", count: 1, action: "none" },
+  ];
+  const actionRows: Array<[string, string]> = [
+    ["toggle", "播放 / 暂停"],
+    ["previous", "上一首"],
+    ["next", "下一首"],
+  ];
+  const types: Array<[string, string]> = [
+    ["clicks", "短按"],
+    ["long", "长按"],
+  ];
+  return `<div class="set-card headless" style="margin:0;border:0;border-top:1px solid var(--border);border-radius:0"><div class="set-card-head"><div class="t">单按钮耳机控制自定义</div><div class="d">左边是功能，右边选择短按或长按</div></div>
+    ${actionRows.map(([action, label]) => {
+      const index = gestures.findIndex((gesture) => gesture.action === action);
+      if (index < 0) return "";
+      const gesture = gestures[index];
+      return `<div class="set-row"><div><div class="label">${label}</div><div class="hint">${gesture.type === "clicks" ? `短按 ${gesture.count} 次` : gesture.type === "long" ? "长按" : `长按 + ${gesture.count} 次点击 + 长按`}</div></div><div class="control" style="gap:6px;flex-wrap:wrap;justify-content:flex-end"><select data-headset-index="${index}" data-headset-field="type">${types.map(([key, text]) => `<option value="${key}"${key === gesture.type ? " selected" : ""}>${text}</option>`).join("")}</select><input type="number" min="1" max="9" value="${gesture.count}" data-headset-index="${index}" data-headset-field="count" style="width:58px" ${gesture.type === "long" ? "disabled" : ""} /></div></div>`;
+    }).join("")}
+    <div class="set-row"><div><div class="label">恢复默认</div><div class="hint">播放暂停短按 1 次，上一首 3 次，下一首 2 次，长按默认不执行</div></div><div class="control"><button class="btn small" data-act="resetHeadset">恢复默认</button></div></div>
+  </div>`;
+}
+
+function immersiveRows(): string {
+  const cfg = settings!;
+  return `<div class="set-card headless" style="margin:0;border:0;border-top:1px solid var(--border);border-radius:0"><div class="set-card-head"><div class="t">沉浸歌词</div><div class="d">侧边栏、频谱、歌词样式与偏移</div></div>
+    ${switchRow("进入沉浸歌词时自动隐藏侧边栏", "新用户默认开启；返回普通歌曲页时恢复侧边栏", "immersive.autoHideSidebar", cfg.immersiveAutoHide)}
+    ${switchRow("显示频谱", "在沉浸歌词界面显示音频频谱", "immersive.spectrum", cfg.immersiveSpectrum)}
+    ${switchRow("启用歌词设置", "在歌曲详细页普通歌词栏右下角显示紧凑的偏移调节", "immersive.lyricSettings", cfg.immersiveLyricSettings)}
+    <div class="set-row"><div><div class="label">歌词字体</div><div class="hint">支持系统字体名称</div></div><div class="control"><input type="text" data-config="immersive.font" value="${esc(cfg.immersiveFont)}" style="width:220px" /></div></div>
+    <div class="set-row"><div><div class="label">字体颜色</div><div class="hint">沉浸歌词主文字颜色</div></div><div class="control"><input type="color" data-config="immersive.color" value="${esc(cfg.immersiveColor)}" /></div></div>
+    <div class="set-row"><div><div class="label">透明度</div><div class="hint">0.2 到 1.0</div></div><div class="control"><input type="number" min="0.2" max="1" step="0.05" data-config="immersive.opacity" value="${cfg.immersiveOpacity}" style="width:90px" /></div></div>
+    ${switchRow("歌词发光", "为歌词文字增加柔和发光", "immersive.glow", cfg.immersiveGlow)}
+    <div class="set-row"><div><div class="label">恢复默认</div><div class="hint">字体、颜色、透明度、发光与偏移设置</div></div><div class="control"><button class="btn small" data-act="resetImmersive">恢复默认</button></div></div>
+  </div>`;
+}
+
+function sortPriorityRows(): string {
+  const keys = state?.sortPriority ?? ["artist", "album", "title", "duration", "liked"];
+  const labels: Record<string, string> = { artist: "歌手", album: "专辑", title: "标题", duration: "时长", liked: "喜欢" };
+  return `<div class="set-card headless" style="margin:0;border:0;border-top:1px solid var(--border);border-radius:0"><div class="set-card-head"><div class="t">列表排序权重</div><div class="d">数值越小优先级越高；所有歌单和歌手歌曲表共用</div></div>
+    ${keys.map((key, index) => `<div class="set-row"><div><div class="label">${index + 1}. ${labels[key] ?? key}</div><div class="hint">${key}</div></div><div class="control"><button class="btn small" data-act="moveSortPriority" data-key="${key}" data-direction="-1" ${index === 0 ? "disabled" : ""}>↑ 上移</button><button class="btn small" data-act="moveSortPriority" data-key="${key}" data-direction="1" ${index === keys.length - 1 ? "disabled" : ""}>↓ 下移</button></div></div>`).join("")}
+  </div>`;
+}
+
 function renderComponents(): string {
   const isLinux = state?.platform === "linux";
   const builtins = components.filter((item) => item.kind === "builtin");
@@ -612,7 +711,14 @@ function renderComponents(): string {
     <div class="set-card headless" style="margin:0;border:0;border-bottom:1px solid var(--border);border-radius:0"><div class="set-card-head"><div class="t">原生组件</div></div>${natives.length ? natives.map(componentCard).join("") : `<div class="empty">未安装 Native Audio Output Engine<br><button class="btn small" data-act="restoreBundled" style="margin-top:8px">${icon("refresh", 11)} 恢复随包原生引擎</button></div>`}</div>
     <div class="set-card headless" style="margin:0;border:0;border-bottom:1px solid var(--border);border-radius:0"><div class="set-card-head"><div class="t">内置模块</div></div>${builtins.map(componentCard).join("")}</div>
     <div class="set-card headless" style="margin:0;border:0;border-radius:0"><div class="set-card-head"><div class="t">组件 UI</div></div>
-    <div class="set-section-title">状态栏</div>
+    <div class="set-section-title">沉浸歌词</div>
+    ${immersiveRows()}
+    <div class="set-section-title">耳机线控</div>
+    ${headsetRows()}
+    <div class="set-section-title">侧边栏</div>
+    ${sidebarItemRows()}
+    <div class="set-section-title">排序与状态栏</div>
+    ${sortPriorityRows()}
     ${switchRow("状态栏：歌名跑马灯","显示/隐藏状态栏歌名","status.showTitle",settings!.showTitle)}
     ${switchRow("状态栏：歌词","显示/隐藏状态栏歌词悬浮窗按钮","status.showLyrics",settings!.showLyricsButton)}${isLinux ? `<div class="set-row"><div><div class="label">Linux 支持</div><div class="hint">当前 Linux 不支持桌面歌词悬浮窗，请等后续完善。状态栏按钮仍可显示，但不会创建悬浮窗。</div></div></div>` : ""}
     ${switchRow("状态栏：缓冲","显示/隐藏状态栏缓冲框","status.showBuffer",settings!.showBuffer)}
@@ -714,6 +820,13 @@ window.addEventListener("message", (event: MessageEvent<HostMessage>) => {
   const msg = event.data;
   if (!msg || typeof msg !== "object") return;
   switch (msg.type) {
+    case "outputState":
+      if (state) {
+        state.output = msg.output;
+        state.actualQuality = msg.actualQuality;
+      }
+      if (tab === "system") render();
+      break;
     case "settingsInit":
       state = msg.state;
       settings = state.settings;
@@ -733,6 +846,18 @@ window.addEventListener("message", (event: MessageEvent<HostMessage>) => {
       account = msg.account;
       if (state) state.account = account;
       if (tab === "account" || tab === "quality") render();
+      break;
+    case "headsetGestures":
+      if (state) state.headsetGestures = msg.gestures;
+      if (tab === "components") render();
+      break;
+    case "sidebarVisible":
+      if (state) state.sidebarVisible = msg.keys;
+      if (tab === "components") render();
+      break;
+    case "sortPriority":
+      if (state) state.sortPriority = msg.keys;
+      if (tab === "components") render();
       break;
     case "components":
       components = msg.items;
