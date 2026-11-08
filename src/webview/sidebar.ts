@@ -216,6 +216,9 @@ function onClick(event: Event): void {
     case "openLiked":
       send("openLiked");
       break;
+    case "openAllMusic":
+      send("openAllMusic");
+      break;
     case "openRecent":
       send("openRecent");
       break;
@@ -403,6 +406,27 @@ function renderListen(): void {
   el.textContent = parts.join("\n");
 }
 
+const COVER_PLACEHOLDER = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==";
+const loadedCovers = new Set<string>();
+
+function lazyCover(url: string, alt = ""): string {
+  const ready = loadedCovers.has(url);
+  return `<img src="${ready ? esc(url) : COVER_PLACEHOLDER}" data-cover="${esc(url)}" alt="${esc(alt)}" loading="lazy" decoding="async">`;
+}
+
+function hydrateCovers(root: HTMLElement): void {
+  const apply = () => {
+    qsa<HTMLImageElement>("img[data-cover]", root).forEach((img) => {
+      const url = img.dataset.cover;
+      if (!url) return;
+      img.src = url;
+      loadedCovers.add(url);
+      delete img.dataset.cover;
+    });
+  };
+  requestAnimationFrame(() => requestAnimationFrame(apply));
+}
+
 function render(): void {
   renderListen();
   const scroll = qs("#sb-scroll");
@@ -416,38 +440,44 @@ function render(): void {
     </div>`;
   };
   const navActive = (key: string): string => (state?.active === key ? " active" : "");
-  const nav = NAV_ITEMS.map(
+  const visible = new Set(state.visible ?? ["account", "recommend", "featured", "podcast", "roam", "following", "friends", "all", "liked", "recent", "collections", "downloads", "local", "cloud", "created", "subscribed"]);
+  if (!state.accountSet) visible.add("account");
+  const mine = (key: string, html: string): string => visible.has(key) ? html : "";
+  const nav = NAV_ITEMS.filter((item) => visible.has(item.key)).map(
     (item) => `<button class="nav-item${navActive(item.key)}" data-act="nav" data-nav="${item.nav}">
       <span class="ico">${icon(item.icon, 15)}</span><span class="label">${item.label}</span>
     </button>`,
   ).join("");
   const liked = state.liked;
-  const myMusic = `
+  const myMusic = `${mine("all", `
+    <button class="nav-item${navActive("all")}" data-act="openAllMusic">
+      <span class="ico">${icon("music", 15)}</span><span class="label">全部音乐</span>
+    </button>`)}${mine("liked", `
     <button class="nav-item liked${navActive("liked")}" data-act="openLiked">
       <span class="ico">${icon("heart", 15)}</span><span class="label">我喜欢的音乐</span>
       <span class="count">${liked ? liked.trackCount : 0}</span>
-    </button>
+    </button>`)}${mine("recent", `
     <button class="nav-item${navActive("recent")}" data-act="openRecent">
       <span class="ico">${icon("clock", 15)}</span><span class="label">最近播放</span>
       <span class="count">${state.counts.recent || ""}</span>
-    </button>
+    </button>`)}${mine("collections", `
     <button class="nav-item${navActive("collections")}" data-act="openCollections">
       <span class="ico">${icon("star", 15)}</span><span class="label">我的收藏</span>
-    </button>
+    </button>`)}${mine("downloads", `
     <button class="nav-item${navActive("downloads")}" data-act="openDownloads">
       <span class="ico">${icon("download", 15)}</span><span class="label">下载管理</span>
       ${state.counts.downloads ? `<span class="badge">${state.counts.downloads}</span>` : ""}
-    </button>
+    </button>`)}${mine("local", `
     <button class="nav-item${navActive("local")}" data-act="openLocal">
       <span class="ico">${icon("folder", 15)}</span><span class="label">本地音乐</span>
       <span class="count">${state.counts.local || ""}</span>
-    </button>
+    </button>`)}${mine("cloud", `
     <button class="nav-item${navActive("cloud")}" data-act="openCloud">
       <span class="ico">${icon("cloud", 15)}</span><span class="label">我的音乐网盘</span>
-    </button>`;
-  const accountRow = account
+    </button>`)}`;
+  const accountRow = !visible.has("account") ? "" : account
     ? `<div class="sb-account" data-act="openMyProfile" title="查看我的主页">
-        ${account.avatarUrl ? `<img src="${esc(cover(account.avatarUrl, 60))}" alt="">` : `<span class="avatar-placeholder">${icon("login", 15)}</span>`}
+        ${account.avatarUrl ? lazyCover(cover(account.avatarUrl, 60)) : `<span class="avatar-placeholder">${icon("login", 15)}</span>`}
         <div style="min-width:0">
           <div class="name">${esc(account.nickname)}</div>
           <div class="sub">${account.vipType && account.vipType > 0 ? (account.vipType >= 10 ? "SVIP 会员" : "VIP 会员") : "网易云音乐用户"}</div>
@@ -461,7 +491,7 @@ function render(): void {
         </div>
       </div>`;
   const playlistItem = (playlist: PlaylistRef, likedStyle = false, editable = false, index = 0): string => `<div class="pl-item${state?.active === `playlist:${playlist.id}` ? " active" : ""}${likedStyle ? " liked" : ""}" data-act="openPlaylist" data-id="${playlist.id}" title="${esc(playlist.name)}">
-    <img src="${esc(cover(playlist.coverImgUrl, 60))}" alt="">
+    ${lazyCover(playlist.cachedCover || cover(playlist.coverImgUrl, 60))}
     <span class="meta">
       <span class="name">${esc(playlist.name)}</span>
       <span class="sub">${playlist.trackCount} 首</span>
@@ -478,11 +508,16 @@ function render(): void {
   const subscribed = state.subscribed.length
     ? state.subscribed.map((playlist) => playlistItem(playlist)).join("")
     : `<div class="pl-empty">${account ? "还没有收藏歌单" : "登录后显示收藏的歌单"}</div>`;
+  const navGroup = nav ? group("nav", "导航", nav) : "";
+  const myGroup = myMusic ? group("my", "我的音乐", myMusic) : "";
+  const createdGroup = visible.has("created") ? group("created", "创建的歌单", created, `<span style="margin-left:auto;display:flex;align-items:center;gap:4px"><span class="count">${state.created.length}</span><button class="icon-btn" data-act="createPlaylist" title="新建歌单">${icon("plus", 12)}</button></span>`) : "";
+  const subscribedGroup = visible.has("subscribed") ? group("subscribed", "收藏的歌单", subscribed, state.subscribed.length ? `<span class="count" style="margin-left:auto">${state.subscribed.length}</span>` : "") : "";
   scroll.innerHTML = `${accountRow}
-    ${group("nav", "导航", nav)}
-    ${group("my", "我的音乐", myMusic)}
-    ${group("created", "创建的歌单", created, `<span style="margin-left:auto;display:flex;align-items:center;gap:4px"><span class="count">${state.created.length}</span><button class="icon-btn" data-act="createPlaylist" title="新建歌单">${icon("plus", 12)}</button></span>`)}
-    ${group("subscribed", "收藏的歌单", subscribed, state.subscribed.length ? `<span class="count" style="margin-left:auto">${state.subscribed.length}</span>` : "")}`;
+    ${navGroup}
+    ${myGroup}
+    ${createdGroup}
+    ${subscribedGroup}`;
+  hydrateCovers(scroll);
   updateLoginButton();
 }
 
