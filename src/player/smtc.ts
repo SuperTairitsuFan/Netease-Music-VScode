@@ -1,8 +1,8 @@
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { execFileSync, spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { log } from "../util/logger";
 import type { PlayerState } from "../protocol";
 
-export type SmtcAction = "play" | "pause" | "next" | "previous" | "stop";
+export type SmtcAction = "click" | "long" | "play" | "pause" | "toggle" | "next" | "previous" | "volumeUp" | "volumeDown" | "stop";
 
 /**
  * Windows System Media Transport Controls bridge.
@@ -25,6 +25,11 @@ export class SmtcService {
   start(binary: string): void {
     if (process.platform !== "win32" || this.child) return;
     try {
+      execFileSync("powershell.exe", ["-NoProfile", "-Command",
+        "Get-CimInstance Win32_Process -Filter \"Name='native-audio-output.exe'\" | Where-Object { $_.CommandLine -match '--smtc' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }",
+      ], { windowsHide: true, timeout: 1500 });
+    } catch { /* best effort cleanup of stale helpers */ }
+    try {
       const child = spawn(binary, ["--smtc"], {
         stdio: ["pipe", "pipe", "pipe"],
         windowsHide: true,
@@ -35,6 +40,7 @@ export class SmtcService {
         const line = data.toString("utf8").trim();
         if (line) log.warn("smtc stderr", line.slice(0, 300));
       });
+      log.info("smtc started", { pid: child.pid });
       child.on("error", (err) => log.warn("smtc spawn failed", err.message));
       child.on("exit", () => {
         this.child = undefined;
@@ -94,9 +100,22 @@ export class SmtcService {
     while (index >= 0) {
       const line = this.buffer.slice(0, index).trim();
       this.buffer = this.buffer.slice(index + 1);
+      if (line.startsWith("R\t")) {
+        log.info("smtc ready", line.slice(2));
+      }
+      if (line.startsWith("P\t")) {
+        const token = line.slice(2);
+        if (token === "click" || token === "long") {
+          log.info("smtc gesture", token);
+          this.onAction(token);
+        }
+      }
       if (line.startsWith("B\t")) {
         const action = line.slice(2) as SmtcAction;
-        if (["play", "pause", "next", "previous", "stop"].includes(action)) this.onAction(action);
+        if (["click", "long", "play", "pause", "toggle", "next", "previous", "volumeUp", "volumeDown", "stop"].includes(action)) {
+          log.info("smtc button", action);
+          this.onAction(action);
+        }
       }
       index = this.buffer.indexOf("\n");
     }
