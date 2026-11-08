@@ -37,8 +37,12 @@ static PFN_RoUninitialize pRoUninitialize;
 
 static const GUID IID_SMTC_INTEROP = {0xddb0472d, 0xc911, 0x4a1f, {0x86, 0xd9, 0xdc, 0x3d, 0x71, 0xa9, 0x5f, 0x5a}};
 static const GUID IID_SMTC = {0x99fa3ff4, 0x1742, 0x42a6, {0x90, 0x2e, 0x08, 0x7d, 0x41, 0xf9, 0x65, 0xec}};
+static const GUID IID_TYPED_HANDLER = {0x0557e996, 0x7b23, 0x5bae, {0xaa, 0x81, 0xea, 0x0d, 0x67, 0x11, 0x43, 0xa4}};
+static const GUID IID_INSPECTABLE = {0xaf86e2e0, 0xb12d, 0x4c6a, {0x9c, 0x5a, 0xd7, 0xaa, 0x65, 0x10, 0x1e, 0x90}};
+static const GUID IID_AGILE = {0x94ea2b94, 0xe9cc, 0x49e0, {0xc0, 0xff, 0xee, 0x64, 0xca, 0x8f, 0x5b, 0x90}};
 
 static HWND g_window;
+static HANDLE g_mutex;
 static void *g_smtc;
 static void *g_display;
 static void *g_music;
@@ -103,29 +107,14 @@ enum {
 };
 
 static HRESULT WINAPI handler_query_interface(ButtonHandler *self, REFIID riid, void **out) {
-  (void)riid;
   if (!out) return E_POINTER;
+  if (!IsEqualGUID(riid, &IID_IUnknown) &&
+      !IsEqualGUID(riid, &IID_TYPED_HANDLER) && !IsEqualGUID(riid, &IID_AGILE)) {
+    *out = NULL;
+    return E_NOINTERFACE;
+  }
   self->ref++;
   *out = self;
-  return S_OK;
-}
-
-static HRESULT WINAPI handler_get_iids(ButtonHandler *self, ULONG *count, IID **iids) {
-  (void)self;
-  if (count) *count = 0;
-  if (iids) *iids = NULL;
-  return S_OK;
-}
-
-static HRESULT WINAPI handler_get_runtime_name(ButtonHandler *self, HSTRING_LOCAL *name) {
-  (void)self;
-  if (name) *name = NULL;
-  return E_NOTIMPL;
-}
-
-static HRESULT WINAPI handler_get_trust(ButtonHandler *self, int *level) {
-  (void)self;
-  if (level) *level = 0;
   return S_OK;
 }
 
@@ -147,8 +136,8 @@ static HRESULT WINAPI handler_invoke(ButtonHandler *self, void *sender, void *ar
   if (FAILED(hr)) return S_OK;
   const char *name = NULL;
   switch (button) {
-    case 0: name = "play"; break;
-    case 1: name = "pause"; break;
+    case 0: name = "click"; break;
+    case 1: name = "click"; break;
     case 2: name = "stop"; break;
     case 6: name = "next"; break;
     case 7: name = "previous"; break;
@@ -166,9 +155,6 @@ static void *g_handler_vtbl[] = {
   (void *)handler_query_interface,
   (void *)handler_add_ref,
   (void *)handler_release,
-  (void *)handler_get_iids,
-  (void *)handler_get_runtime_name,
-  (void *)handler_get_trust,
   (void *)handler_invoke,
 };
 
@@ -202,6 +188,12 @@ static void smtc_set_status(const char *status) {
   else if (status && strcmp(status, "pause") == 0) value = 4; /* Paused */
   EnterCriticalSection(&g_lock);
   ((HRESULT(WINAPI *)(void *, int))VTBL(g_smtc)[SMTC_PUT_PLAYBACK_STATUS])(g_smtc, value);
+  ((HRESULT(WINAPI *)(void *, int))VTBL(g_smtc)[SMTC_PUT_IS_ENABLED])(g_smtc, 1);
+  ((HRESULT(WINAPI *)(void *, int))VTBL(g_smtc)[SMTC_PUT_IS_PLAY_ENABLED])(g_smtc, 1);
+  ((HRESULT(WINAPI *)(void *, int))VTBL(g_smtc)[SMTC_PUT_IS_PAUSE_ENABLED])(g_smtc, 1);
+  ((HRESULT(WINAPI *)(void *, int))VTBL(g_smtc)[SMTC_PUT_IS_STOP_ENABLED])(g_smtc, 0);
+  ((HRESULT(WINAPI *)(void *, int))VTBL(g_smtc)[SMTC_PUT_IS_PREVIOUS_ENABLED])(g_smtc, 1);
+  ((HRESULT(WINAPI *)(void *, int))VTBL(g_smtc)[SMTC_PUT_IS_NEXT_ENABLED])(g_smtc, 1);
   LeaveCriticalSection(&g_lock);
 }
 
@@ -215,8 +207,8 @@ static LRESULT CALLBACK smtc_wndproc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM 
   }
   if (msg == WM_HOTKEY) {
     const char *name = NULL;
-    if (wparam == 1) name = "play";
-    else if (wparam == 2) name = "pause";
+    if (wparam == 1) name = "toggle";
+    else if (wparam == 2) name = "stop";
     else if (wparam == 3) name = "next";
     else if (wparam == 4) name = "previous";
     if (name) {
@@ -227,6 +219,45 @@ static LRESULT CALLBACK smtc_wndproc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM 
     return 0;
   }
   return DefWindowProcW(hwnd, msg, wparam, lparam);
+}
+
+static HHOOK g_key_hook;
+static int g_media_vk;
+static int g_media_down;
+static DWORD g_media_down_at;
+
+static LRESULT CALLBACK media_key_proc(int code, WPARAM wparam, LPARAM lparam) {
+  if (code == HC_ACTION) {
+    KBDLLHOOKSTRUCT *event = (KBDLLHOOKSTRUCT *)lparam;
+    if (event && (event->vkCode == VK_MEDIA_PLAY_PAUSE || event->vkCode == VK_MEDIA_NEXT_TRACK ||
+                  event->vkCode == VK_MEDIA_PREV_TRACK || event->vkCode == VK_MEDIA_STOP)) {
+      if (wparam == WM_KEYDOWN || wparam == WM_SYSKEYDOWN) {
+        if (!g_media_down) {
+          g_media_down = 1;
+          g_media_vk = (int)event->vkCode;
+          g_media_down_at = GetTickCount();
+        }
+        return 1;
+      }
+      if (wparam == WM_KEYUP || wparam == WM_SYSKEYUP) {
+        if (g_media_down && g_media_vk == (int)event->vkCode) {
+          DWORD held = GetTickCount() - g_media_down_at;
+          g_media_down = 0;
+          if (event->vkCode == VK_MEDIA_PLAY_PAUSE) {
+            emit_line(held >= 500 ? "P\tlong" : "P\tclick");
+          } else if (event->vkCode == VK_MEDIA_NEXT_TRACK) {
+            emit_line("B\tnext");
+          } else if (event->vkCode == VK_MEDIA_PREV_TRACK) {
+            emit_line("B\tprevious");
+          } else {
+            emit_line("B\tstop");
+          }
+        }
+        return 1;
+      }
+    }
+  }
+  return CallNextHookEx(g_key_hook, code, wparam, lparam);
 }
 
 static HWND create_hidden_window(void) {
@@ -277,6 +308,11 @@ static int load_combase(void) {
 }
 
 int naoe_smtc_main(void) {
+  g_mutex = CreateMutexW(NULL, TRUE, L"Local\\NaoeSmtcHelper");
+  if (!g_mutex || GetLastError() == ERROR_ALREADY_EXISTS) {
+    if (g_mutex) CloseHandle(g_mutex);
+    return 0;
+  }
   if (load_combase() != 0) {
     fprintf(stderr, "smtc: combase unavailable\n");
     return 1;
@@ -308,6 +344,8 @@ int naoe_smtc_main(void) {
   InitializeCriticalSection(&g_lock);
   g_handler.vtbl = g_handler_vtbl;
   g_handler.ref = 1;
+  hr = ((HRESULT(WINAPI *)(void *, void *, int64_t *))VTBL(g_smtc)[SMTC_ADD_BUTTON_PRESSED])(g_smtc, &g_handler, &g_button_token);
+  if (FAILED(hr)) fprintf(stderr, "smtc: add button handler failed (%08x)\n", (unsigned)hr);
 
   ((HRESULT(WINAPI *)(void *, int))VTBL(g_smtc)[SMTC_PUT_IS_ENABLED])(g_smtc, 1);
   ((HRESULT(WINAPI *)(void *, int))VTBL(g_smtc)[SMTC_PUT_IS_PLAY_ENABLED])(g_smtc, 1);
@@ -321,10 +359,14 @@ int naoe_smtc_main(void) {
     HRESULT mh = ((HRESULT(WINAPI *)(void *, void **))VTBL(g_display)[DISPLAY_GET_MUSIC])(g_display, &g_music);
   }
 
-  RegisterHotKey(g_window, 1, MOD_NOREPEAT, VK_MEDIA_PLAY_PAUSE);
-  RegisterHotKey(g_window, 2, MOD_NOREPEAT, VK_MEDIA_STOP);
-  RegisterHotKey(g_window, 3, MOD_NOREPEAT, VK_MEDIA_NEXT_TRACK);
-  RegisterHotKey(g_window, 4, MOD_NOREPEAT, VK_MEDIA_PREV_TRACK);
+  g_key_hook = SetWindowsHookExW(WH_KEYBOARD_LL, media_key_proc, GetModuleHandleW(NULL), 0);
+  if (!g_key_hook) {
+    fprintf(stderr, "smtc: keyboard hook failed (%lu), fallback hotkeys\n", GetLastError());
+    RegisterHotKey(g_window, 1, MOD_NOREPEAT, VK_MEDIA_PLAY_PAUSE);
+    RegisterHotKey(g_window, 2, MOD_NOREPEAT, VK_MEDIA_STOP);
+    RegisterHotKey(g_window, 3, MOD_NOREPEAT, VK_MEDIA_NEXT_TRACK);
+    RegisterHotKey(g_window, 4, MOD_NOREPEAT, VK_MEDIA_PREV_TRACK);
+  }
   emit_line("R\tsmtc");
   HANDLE reader = CreateThread(NULL, 0, stdin_thread, NULL, 0, NULL);
   if (reader) CloseHandle(reader);
@@ -336,17 +378,17 @@ int naoe_smtc_main(void) {
   }
 
   InterlockedExchange(&g_stop, 1);
+  if (g_button_token) ((HRESULT(WINAPI *)(void *, int64_t))VTBL(g_smtc)[SMTC_REMOVE_BUTTON_PRESSED])(g_smtc, g_button_token);
   ((HRESULT(WINAPI *)(void *, int))VTBL(g_smtc)[SMTC_PUT_IS_ENABLED])(g_smtc, 0);
   if (g_music) ((ULONG(WINAPI *)(void *))VTBL(g_music)[2])(g_music);
   if (g_display) ((ULONG(WINAPI *)(void *))VTBL(g_display)[2])(g_display);
   if (g_smtc) ((ULONG(WINAPI *)(void *))VTBL(g_smtc)[2])(g_smtc);
-  UnregisterHotKey(g_window, 1);
-  UnregisterHotKey(g_window, 2);
-  UnregisterHotKey(g_window, 3);
-  UnregisterHotKey(g_window, 4);
+  if (g_key_hook) UnhookWindowsHookEx(g_key_hook);
+  else { UnregisterHotKey(g_window, 1); UnregisterHotKey(g_window, 2); UnregisterHotKey(g_window, 3); UnregisterHotKey(g_window, 4); }
   DeleteCriticalSection(&g_lock);
   DestroyWindow(g_window);
   pRoUninitialize();
+  if (g_mutex) { ReleaseMutex(g_mutex); CloseHandle(g_mutex); }
   return 0;
 }
 
