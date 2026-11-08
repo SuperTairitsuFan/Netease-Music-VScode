@@ -1,8 +1,8 @@
 {
   "name": "netease-music-vscode",
   "displayName": "网易云音乐 for VS Code（非官方）",
-  "description": "非官方第三方网易云音乐 Windows 客户端：EAPI 直连、PC 风侧边栏、歌单/歌手/搜索/评论、原生 WASAPI/ASIO、SMTC 与沉浸歌词。",
-  "version": "1.3.1",
+  "description": "非官方第三方网易云音乐客户端：EAPI 直连、PC 风侧边栏、歌单/歌手/搜索/评论、原生 WASAPI/ASIO/ALSA、SMTC 与沉浸歌词。",
+  "version": "1.3.2",
   "publisher": "AICis",
   "license": "MIT",
   "engines": {
