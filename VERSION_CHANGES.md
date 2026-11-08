@@ -1405,3 +1405,8 @@
 - 当前发布版仅保留 Windows x64 / arm64，Linux 版本后续单独调试；README 增加已有功能概括、对比 1.0.83 的新增能力与修复清单。
 - 蓝牙耳机允许原生 WASAPI 共享输出；单按钮耳机保留短按/长按手势。
 - 更新 Marketplace/GitHub 发布说明。
+
+## v1.3.2
+
+- 恢复 Linux x64 / arm64 构建与发布，与 Windows 一起发布四架构 VSIX。
+- README 恢复 Windows / Linux 双平台说明，并保留已有功能、对比新增与修复清单。
