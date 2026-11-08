@@ -6,7 +6,47 @@
 >
 > 如果官方下场、提出异议，或要求停止分发，我会立即下架相关项目文档、GitHub 仓库、Release 和 Marketplace 插件，不继续分发。
 
-在 VS Code 里做一个桌面客户端形态的网易云音乐：侧边栏管理歌单，编辑器区浏览歌曲、歌手、专辑、评论，底部状态条控制播放。数据通过 EAPI 获取，可选 Windows WASAPI / ASIO / Linux ALSA 原生音频输出。
+## 已有功能（概括）
+
+- 登录：扫码、手机验证码、手机密码、邮箱密码
+- 浏览：推荐、每日推荐、精选、歌单、歌手、专辑、排行榜、播客、搜索、本地音乐、云盘
+- 歌单：我喜欢的音乐、全部音乐、创建/收藏歌单、歌单排序、歌单搜索
+- 播放：顺序/循环/单曲/随机、队列、最近播放、下载、封面下载
+- 歌词：详细页歌词、沉浸歌词、歌词偏移、字体/颜色/透明度/发光、频谱
+- 音频：WebAudio、Windows WASAPI Shared/Exclusive、ASIO、Bit-perfect、HRTF
+- 社交：好友、私信、评论、回复、点赞、一起听
+- 集成：VS Code 侧边栏、状态栏、SMTC、系统媒体键、单按钮耳机线控
+- 缓存：歌曲缓存、歌单/推荐 JSON、封面、歌词偏移、侧边栏预加载
+- 设置：组件管理、侧边栏按钮、排序权重、输出链路、沉浸歌词、耳机手势
+
+## 对比上一版本（1.0.83）
+
+新增：
+
+- 全部音乐聚合歌单、我喜欢的音乐 + 创建歌单
+- 收藏弹窗缓存优先，显示歌曲已属于哪些歌单
+- 每日推荐当日缓存、歌单/推荐表格缓存
+- 侧边栏 JSON/CSV 预加载、封面缓存、先文字后封面
+- 沉浸歌词设置、歌词偏移、频谱、字体/颜色/透明度/发光
+- SMTC 系统媒体卡、系统媒体键、单按钮耳机线控
+- 侧边栏按钮显示自定义、排序权重自定义、账号详细入口
+- 系统页实时输出链路、蓝牙原生 WASAPI 共享输出
+- 歌曲缓存迁入 `songs` 子目录，歌单缓存迁入 `library` 子目录
+
+修复：
+
+- 一起听双方来回切歌、目标歌曲缺失、进度漂移、失败后连续切歌
+- “全部音乐”虚拟 ID 0 报无效歌单
+- 歌曲详情操作按钮错位
+- 侧边栏启动等待网络、封面阻塞文字
+- SMTC 按钮无效、按钮回调崩溃、元数据不显示、重复 helper 进程
+- 蓝牙暂停后恢复播放异常
+- 收藏弹窗和歌单加载慢、重复网络请求
+
+> 当前仅提供 Windows 构建；Linux 版本后续单独调试和发布。
+
+
+在 VS Code 里做一个桌面客户端形态的网易云音乐：侧边栏管理歌单，编辑器区浏览歌曲、歌手、专辑、评论，底部状态条控制播放。数据通过 EAPI 获取，可选 Windows WASAPI / ASIO 原生音频输出。当前版本仅发布 Windows x64 / arm64。
 
 项目只用于个人学习、折腾和自用，不商用，不提供、不托管任何音乐内容。
 
@@ -17,16 +57,16 @@
 ## 当前版本
 
 ```text
-1.0.83
+1.3.1
 ```
 
-作为第一版公开构建发布。
+Windows 版公开构建发布。
 
 当前主要能力：
 
 - 推荐、每日推荐、歌单、歌手、专辑、搜索、排行榜、播客、本地音乐、云盘
 - 歌曲详情、评论、回复、点赞、收藏到歌单
-- 原生 WASAPI Shared / Exclusive、ASIO、Linux ALSA
+- 原生 WASAPI Shared / Exclusive、ASIO
 - 1–8 声道源文件按实际声道输出；设备通道不足时明确报错
 - 沉浸环绕声（5.1）音质选项
 - 双声道 HRTF 空间增强；与 Bit-perfect 互斥
@@ -60,14 +100,12 @@ vscode:extension/AICis.netease-music-vscode
 ```text
 win32-x64
 win32-arm64
-linux-x64
-linux-arm64
 ```
 
 安装示例：
 
 ```bash
-code --install-extension netease-music-vscode-1.0.83-win32-x64.vsix
+code --install-extension netease-music-vscode-1.3.1-win32-x64.vsix
 ```
 
 ## 首次启动
@@ -82,7 +120,6 @@ code --install-extension netease-music-vscode-1.0.83-win32-x64.vsix
 ## 音频
 
 - Windows：WASAPI Shared / Exclusive、ASIO
-- Linux：ALSA
 - WebAudio：默认兼容路径
 - 原生输出按源文件声道数打开；设备输出通道不足时拒绝静默降混
 - 多声道设备可原样输出；双声道设备可开启 HRTF 下混
@@ -108,7 +145,7 @@ WebAudio：不能原样输出 5.1
 
 ## 从源码构建
 
-要求 Node.js ≥ 20、npm。构建原生组件还需要 [zig](https://ziglang.org/) 0.15.x。
+要求 Windows、Node.js ≥ 20、npm。构建原生组件还需要 [zig](https://ziglang.org/) 0.15.x。Linux 版本暂不构建。
 
 ```bash
 npm install
