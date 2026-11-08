@@ -4,7 +4,7 @@ import * as path from "node:path";
 import * as vscode from "vscode";
 import type { SessionManager } from "../auth/session";
 import type { MusicConfig, PlayMode, Quality } from "../config";
-import { QUALITY_LABELS } from "../config";
+import { audioCacheDir, QUALITY_LABELS } from "../config";
 import type { LyricPayload, SongUrlResult, Track } from "../api/types";
 import type { HostMessage, LoadRequest, NativeFormatView, OutputView, PlaybackSource, PlayerState, WebviewMessage } from "../protocol";
 import { downloadToFile, downloadToGrowingFile } from "../download/fetcher";
@@ -106,7 +106,7 @@ export class PlayerService implements vscode.Disposable {
   async pruneCacheNow(): Promise<void> {
     const cfg = this.getConfig();
     const dir = cfg.cache.enabled
-      ? cfg.cache.dir || path.join(this.ctx.globalStorageUri.fsPath, "cache", "audio")
+      ? audioCacheDir(this.ctx, cfg.cache.dir)
       : path.join(this.ctx.globalStorageUri.fsPath, "cache", "audio");
     await this.pruneCache(dir, Math.max(64, cfg.cache.maxSizeMB) * 1024 * 1024);
   }
@@ -1012,7 +1012,7 @@ export class PlayerService implements vscode.Disposable {
   private async findCachedAudio(song: Track): Promise<string | undefined> {
     const cfg = this.getConfig();
     const dir = cfg.cache.enabled
-      ? cfg.cache.dir || path.join(this.ctx.globalStorageUri.fsPath, "cache", "audio")
+      ? audioCacheDir(this.ctx, cfg.cache.dir)
       : path.join(this.ctx.globalStorageUri.fsPath, "cache", "audio");
     const prefix = `${song.id}-${cfg.quality}-`;
     let names: string[];
@@ -1075,7 +1075,7 @@ export class PlayerService implements vscode.Disposable {
     const cfg = this.getConfig();
     const ext = resolved.type === "flac" ? "flac" : "mp3";
     const dir = cfg.cache.enabled
-      ? cfg.cache.dir || path.join(this.ctx.globalStorageUri.fsPath, "cache", "audio")
+      ? audioCacheDir(this.ctx, cfg.cache.dir)
       : path.join(this.ctx.globalStorageUri.fsPath, "cache", "audio");
     const file = path.join(dir, `${song.id}-${cfg.quality}-${resolved.br}.${ext}`);
     const stat = await fs.stat(file).catch(() => null);
@@ -1211,7 +1211,7 @@ export class PlayerService implements vscode.Disposable {
     const cfg = this.getConfig();
     const ext = resolved.type === "flac" ? "flac" : "mp3";
     const dir = cfg.cache.enabled
-      ? cfg.cache.dir || path.join(this.ctx.globalStorageUri.fsPath, "cache", "audio")
+      ? audioCacheDir(this.ctx, cfg.cache.dir)
       : path.join(this.ctx.globalStorageUri.fsPath, "cache", "audio");
     const finalPath = path.join(dir, `${song.id}-${cfg.quality}-${resolved.br}.${ext}`);
     return { finalPath, partPath: finalPath + ".part", donePath: finalPath + ".done" };
