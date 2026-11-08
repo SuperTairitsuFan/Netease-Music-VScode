@@ -34,6 +34,10 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider, vscode.D
     return this.ready && Boolean(this.view);
   }
 
+  asWebviewUri(filePath: string): string {
+    return this.view ? this.view.webview.asWebviewUri(vscode.Uri.file(filePath)).toString() : "";
+  }
+
   resolveWebviewView(view: vscode.WebviewView): void {
     this.view = view;
     this.ready = false;
