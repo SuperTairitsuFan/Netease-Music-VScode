@@ -1,5 +1,6 @@
 import * as fs from "node:fs/promises";
 import * as fsSync from "node:fs";
+import { createHash } from "node:crypto";
 import * as path from "node:path";
 import { spawn } from "node:child_process";
 import * as vscode from "vscode";
@@ -27,6 +28,9 @@ function safeDirStats(dir: string, exts?: RegExp): { bytes: number; files: numbe
 
 import * as QRCode from "qrcode";
 import { SessionManager } from "./auth/session";
+import { cacheContains, emptyFavoriteCache, readFavoriteCache, setCachedTracks, writeFavoriteCache, type FavoriteCacheFile } from "./cache/favoriteCache";
+import { readRecommendCache, writeRecommendCache } from "./cache/recommendCache";
+import { readSidebarCache, writeSidebarCache } from "./cache/sidebarCache";
 import { commentResource } from "./api/client";
 import type {
   Account,
@@ -44,11 +48,13 @@ import type {
   UserPage,
 } from "./api/types";
 import {
+  audioCacheDir,
   defaultCacheDir,
   getConfig,
   QUALITY_LABELS,
   QUALITY_OPTIONS,
   type Quality,
+  type SortKey,
 } from "./config";
 import { DownloadManager } from "./download/downloader";
 import { ComponentStore, type ComponentRecord } from "./player/components";
@@ -155,6 +161,9 @@ export class App implements vscode.Disposable {
   private listenPlayMode = "ORDER_LOOP";
   private listenForceSeek = false;
   private listenLastProgress?: number;
+  private listenPending?: { targetSongId: number; at: number; trackName?: string; artists?: string };
+  private listenFailedTrackId = 0;
+  private listenRetryAt = 0;
   private currentPage: PageView = { kind: "recommend", title: "推荐", loading: true };
   private pageHistory: PageView[] = [];
   private followingSong = false;
@@ -164,6 +173,18 @@ export class App implements vscode.Disposable {
   private lastOutputKind = "";
   private activePlaylist?: PlaylistDetail;
   private readonly playlistCache = new Map<number, PlaylistDetail>();
+  private favoriteCache: FavoriteCacheFile = emptyFavoriteCache();
+  private favoriteCacheDir = "";
+  private favoriteTrackId = 0;
+  private favoritePickerOpen = false;
+  private favoriteSyncing = false;
+  private favoriteSyncTimer?: NodeJS.Timeout;
+  private readonly coverCache = new Map<number, string>();
+  private sidebarCacheState?: SidebarState;
+  private sidebarCacheTimer?: NodeJS.Timeout;
+  private lyricOffsets: Record<string, number> = {};
+  private lyricOffsetDir = "";
+  private lyricOffsetTrackId = 0;
   private commentsTarget?: CommentsTarget;
   private commentsView?: CommentsView;
   private subscribersView?: SubscribersView;
@@ -304,11 +325,67 @@ export class App implements vscode.Disposable {
     this.updateStatus();
   }
 
+  private headsetTokens: string[] = [];
+  private headsetGestureTimer?: NodeJS.Timeout;
+
+  private headsetSequence(gesture: import("./config").HeadsetGesture): string[] {
+    if (gesture.type === "long") return ["long"];
+    return Array(Math.max(1, gesture.count)).fill("click");
+  }
+
+  private handleHeadsetToken(token: "click" | "long"): void {
+    this.headsetTokens.push(token);
+    if (this.headsetGestureTimer) clearTimeout(this.headsetGestureTimer);
+    const gestures = getConfig().headset.gestures.map((gesture) => ({
+      gesture,
+      sequence: this.headsetSequence(gesture),
+    }));
+    const prefix = this.headsetTokens.join(",");
+    const candidates = gestures.filter(({ sequence }) => sequence.slice(0, this.headsetTokens.length).join(",") === prefix);
+    if (!candidates.length) {
+      this.headsetTokens = [];
+      return;
+    }
+    const exact = candidates.find(({ sequence }) => sequence.length === this.headsetTokens.length);
+    const longer = candidates.some(({ sequence }) => sequence.length > this.headsetTokens.length);
+    if (exact && !longer) {
+      this.headsetTokens = [];
+      this.executeHeadsetAction(exact.gesture.action);
+      return;
+    }
+    this.headsetGestureTimer = setTimeout(() => {
+      this.headsetGestureTimer = undefined;
+      const current = this.headsetTokens.join(",");
+      const match = candidates
+        .filter(({ sequence }) => sequence.join(",") === current)
+        .sort((a, b) => b.sequence.length - a.sequence.length)[0];
+      this.headsetTokens = [];
+      if (match) this.executeHeadsetAction(match.gesture.action);
+    }, token === "long" ? 900 : 350);
+  }
+
+  private executeHeadsetAction(action: string): void {
+    if (action === "toggle") void this.player.toggle();
+    else if (action === "next") void this.player.next(true);
+    else if (action === "previous") void this.player.previous();
+    else if (action === "volumeUp") void this.player.setVolume(Math.min(1, this.player.state().volume + 0.05));
+    else if (action === "volumeDown") void this.player.setVolume(Math.max(0, this.player.state().volume - 0.05));
+  }
+
   private async startSmtc(): Promise<void> {
-    if (process.platform !== "win32") return;
+    if (process.platform !== "win32" || this.smtc) return;
     const record = await this.components.nativeRecord().catch(() => undefined);
-    if (!record?.entryPath || record.status !== "ready") return;
+    if (!record?.entryPath || record.status === "removed") return;
     this.smtc = new SmtcService((action) => {
+      log.info("smtc action", { action, playing: this.player.state().playing, track: this.player.state().track?.id });
+      if (action === "click" || action === "long") {
+        this.handleHeadsetToken(action);
+        return;
+      }
+      if (action === "toggle") {
+        this.handleHeadsetToken("click");
+        return;
+      }
       const playing = this.player.state().playing;
       if (action === "play") {
         if (!playing) void this.player.toggle();
@@ -325,7 +402,28 @@ export class App implements vscode.Disposable {
   }
 
   async activate(): Promise<void> {
+    this.favoriteCacheDir = this.libraryCacheDir();
+    this.lyricOffsetDir = path.join(getConfig().cache.dir || defaultCacheDir(this.ctx), "library", "lyrics");
+    await fs.mkdir(this.lyricOffsetDir, { recursive: true }).catch(() => undefined);
+    try {
+      const raw = await fs.readFile(path.join(this.lyricOffsetDir, "offsets.json"), "utf8");
+      this.lyricOffsets = JSON.parse(raw) as Record<string, number>;
+    } catch {
+      this.lyricOffsets = {};
+    }
+    if (this.favoriteCacheDir) {
+      await fs.mkdir(this.favoriteCacheDir, { recursive: true }).catch(() => undefined);
+      this.favoriteCache = await readFavoriteCache(this.favoriteCacheDir);
+      this.sidebarCacheState = await readSidebarCache(this.favoriteCacheDir);
+      if (!this.userPlaylists.length && this.favoriteCache.playlists.length) {
+        this.userPlaylists = this.favoriteCache.playlists;
+        this.playlistsLoaded = true;
+      }
+      void this.syncPlaylistCovers(this.userPlaylists).catch(() => undefined);
+    }
+    void this.migrateLegacyAudioCache().catch(() => undefined);
     this.registerViews();
+    void this.sidebar.ensureReady().catch(() => false);
     this.registerCommands();
     this.wireEvents();
 
@@ -345,12 +443,16 @@ export class App implements vscode.Disposable {
     } catch (err) {
       log.warn("component scan failed", String(err));
     }
-    void this.sidebar.ensureReady().catch(() => false);
+    void this.startSmtc();
     try {
       await this.player.restore();
     } catch (err) {
       log.warn("playback restore failed", String(err));
     }
+    this.favoriteSyncTimer = setInterval(() => {
+      void this.refreshUserPlaylists().catch(() => undefined);
+      void this.syncFavoriteCache(this.favoriteTrackId).catch(() => undefined);
+    }, 120000);
     this.updateStatus();
     if (getConfig().ui.autoOpen) {
       this.mainPanel.createOrShow();
@@ -360,6 +462,7 @@ export class App implements vscode.Disposable {
     void this.pushComponents();
     void this.ensureNative()
       .then(() => {
+        void this.startSmtc();
         const cfg = getConfig();
         if (cfg.lyricsOverlay.enabled && cfg.lyricsOverlay.startOnLaunch) void this.startLyricsOverlay();
       })
@@ -418,6 +521,23 @@ export class App implements vscode.Disposable {
           void this.probeAudio(false).catch(() => undefined).finally(() => { this.probing = false; });
         }
         if (!event.affectsConfiguration("neteaseMusic")) return;
+        if (event.affectsConfiguration("neteaseMusic.headset.gestures")) {
+          this.settingsPanel.post({ type: "headsetGestures", gestures: getConfig().headset.gestures });
+        }
+        if (event.affectsConfiguration("neteaseMusic.immersive")) {
+          this.broadcast({ type: "immersiveConfig", config: getConfig().immersive });
+        }
+        if (event.affectsConfiguration("neteaseMusic.sidebar.visible")) {
+          const keys = getConfig().sidebar.visible;
+          this.broadcast({ type: "sidebarVisible", keys });
+          this.settingsPanel.post({ type: "sidebarVisible", keys });
+          this.pushSidebar();
+        }
+        if (event.affectsConfiguration("neteaseMusic.list.sortPriority")) {
+          const keys = getConfig().list.sortPriority;
+          this.broadcast({ type: "sortPriority", keys });
+          this.settingsPanel.post({ type: "sortPriority", keys });
+        }
         this.pushSettings();
         if (event.affectsConfiguration("neteaseMusic.output")) void this.player.refreshOutput();
         if (event.affectsConfiguration("neteaseMusic.ui")) this.pushTheme();
@@ -501,9 +621,9 @@ export class App implements vscode.Disposable {
 
   private async sendInit(surface: WebviewSurface): Promise<void> {
     if (surface === "sidebar") {
-      await this.refreshUserPlaylists().catch(() => undefined);
       this.sidebar.post({ type: "sidebarInit", state: this.sidebarState() });
       this.sidebar.post({ type: "state", state: this.player.state() });
+      void this.refreshUserPlaylists().catch(() => undefined);
       return;
     }
     if (surface === "settings") {
@@ -536,6 +656,9 @@ export class App implements vscode.Disposable {
         ...(this.ctx.globalState.get<Record<string, boolean>>(PANELS_KEY) ?? {}),
         ...cfg.ui.panels,
       },
+      sortPriority: cfg.list.sortPriority,
+      immersive: cfg.immersive,
+      lyricOffsets: this.lyricOffsets,
       components: (await this.components.list()).map((record) => this.components.toView(record)),
       native: await this.nativeStatus(),
       downloads: this.downloads.toViews(),
@@ -564,6 +687,11 @@ export class App implements vscode.Disposable {
       version: String(this.ctx.extension.packageJSON.version ?? "0.0.0"),
       platform: process.platform,
       arch: process.arch,
+      sortPriority: getConfig().list.sortPriority,
+      sidebarVisible: getConfig().sidebar.visible,
+      output: this.player.state().output,
+      actualQuality: this.player.state().actualQuality,
+      headsetGestures: getConfig().headset.gestures,
       loggedIn: this.session.loggedIn,
       vip: this.session.vip,
     };
@@ -572,7 +700,7 @@ export class App implements vscode.Disposable {
   private resourceStats() {
     const cfg = getConfig();
     const extension = safeDirStats(this.ctx.extensionPath);
-    const cache = safeDirStats(cfg.cache.dir || defaultCacheDir(this.ctx), /\.(flac|mp3|part)$/i);
+    const cache = safeDirStats(audioCacheDir(this.ctx, cfg.cache.dir), /\.(flac|mp3|part)$/i);
     const download = safeDirStats(this.downloads.dir, /\.(flac|mp3|m4a|wav|ogg)$/i);
     const coverDir = cfg.cover.dir || path.join(this.downloads.dir, "covers");
     const cover = safeDirStats(coverDir, /\.(png|jpe?g|webp|gif)$/i);
@@ -608,6 +736,13 @@ export class App implements vscode.Disposable {
       showNavigation: cfg.status.showNavigation,
       showBuffer: cfg.status.showBuffer,
       showQueue: cfg.status.showQueue,
+      immersiveAutoHide: cfg.immersive.autoHideSidebar,
+      immersiveSpectrum: cfg.immersive.spectrum,
+      immersiveLyricSettings: cfg.immersive.lyricSettings,
+      immersiveFont: cfg.immersive.font,
+      immersiveColor: cfg.immersive.color,
+      immersiveOpacity: cfg.immersive.opacity,
+      immersiveGlow: cfg.immersive.glow,
       lyricsEnabled: cfg.lyricsOverlay.enabled,
       lyricsStartOnLaunch: cfg.lyricsOverlay.startOnLaunch,
       lyricsFont: cfg.lyricsOverlay.font,
@@ -630,7 +765,7 @@ export class App implements vscode.Disposable {
       downloadDir: this.downloads.dir,
       coverDir: cfg.cover.dir || path.join(this.downloads.dir, "covers"),
       coverFilenameTemplate: cfg.cover.filenameTemplate,
-      cacheDir: cfg.cache.dir || defaultCacheDir(this.ctx),
+      cacheDir: audioCacheDir(this.ctx, cfg.cache.dir),
       cacheLocked: this.player.state().output.kind === "native",
       localMusicDir: cfg.localMusic.dir || this.downloads.dir,
       componentsDir: this.components.rootDir,
@@ -665,6 +800,7 @@ export class App implements vscode.Disposable {
       saveLyric: cfg.download.saveLyric,
       cacheEnabled: cfg.cache.enabled,
       cacheMaxSizeMB: cfg.cache.maxSizeMB,
+      libraryCacheEnabled: cfg.cache.libraryEnabled,
     };
   }
 
@@ -679,10 +815,56 @@ export class App implements vscode.Disposable {
     this.settingsPanel.post({ type: "components", items, native });
   }
 
+  private playlistRef(playlist: UserPlaylist): PlaylistRef {
+    const ref = this.toPlaylistRef(playlist);
+    const cached = this.coverCache.get(playlist.id);
+    if (cached) ref.cachedCover = cached;
+    return ref;
+  }
+
+  private async syncPlaylistCovers(playlists: UserPlaylist[]): Promise<void> {
+    if (!this.favoriteCacheDir || !playlists.length) return;
+    const dir = path.join(this.favoriteCacheDir, "covers");
+    await fs.mkdir(dir, { recursive: true }).catch(() => undefined);
+    let changed = false;
+    await Promise.all(playlists.map(async (playlist) => {
+      if (!playlist.coverImgUrl) return;
+      const url = `${playlist.coverImgUrl.replace(/^http:/, "https:")}${playlist.coverImgUrl.includes("?") ? "&" : "?"}param=64y64`;
+      const hash = createHash("sha1").update(url).digest("hex").slice(0, 12);
+      const file = path.join(dir, `${playlist.id}-${hash}.jpg`);
+      try {
+        await fs.access(file);
+      } catch {
+        try {
+          const response = await fetch(url);
+          if (!response.ok) return;
+          await fs.writeFile(file, Buffer.from(await response.arrayBuffer()));
+        } catch {
+          return;
+        }
+      }
+      const uri = this.sidebar.asWebviewUri(file);
+      if (uri && this.coverCache.get(playlist.id) !== uri) {
+        this.coverCache.set(playlist.id, uri);
+        changed = true;
+      }
+    }));
+    if (changed) this.pushSidebar();
+  }
+
   private sidebarState(): SidebarState {
-    const account = this.session.accountInfo;
+    if (!this.userPlaylists.length && this.sidebarCacheState) {
+      return {
+        ...this.sidebarCacheState,
+        active: this.activeNav,
+        collapsed: getConfig().ui.panels,
+        version: String(this.ctx.extension.packageJSON.version ?? "0.0.0"),
+        listen: this.listen,
+      };
+    }
+    const account = this.session.accountInfo ?? this.sidebarCacheState?.account ?? null;
     const likedItem = this.userPlaylists.find((playlist) => playlist.specialType === 5) ?? null;
-    const liked = likedItem ? this.toPlaylistRef(likedItem) : null;
+    const liked = likedItem ? this.playlistRef(likedItem) : null;
     const created = this.userPlaylists
       .filter((playlist) => playlist.specialType !== 5 && !playlist.subscribed)
       .sort((a, b) => {
@@ -693,10 +875,10 @@ export class App implements vscode.Disposable {
         if (bi < 0) return -1;
         return ai - bi;
       })
-      .map((playlist) => this.toPlaylistRef(playlist));
+      .map((playlist) => this.playlistRef(playlist));
     const subscribed = this.userPlaylists
       .filter((playlist) => playlist.specialType !== 5 && playlist.subscribed)
-      .map((playlist) => this.toPlaylistRef(playlist));
+      .map((playlist) => this.playlistRef(playlist));
     const activeDownloads = this.downloads
       .toViews()
       .filter((task) => task.status === "downloading" || task.status === "queued").length;
@@ -716,6 +898,8 @@ export class App implements vscode.Disposable {
       collapsed: getConfig().ui.panels,
       version: String(this.ctx.extension.packageJSON.version ?? "0.0.0"),
       listen: this.listen,
+      visible: getConfig().sidebar.visible,
+      accountSet: getConfig().sidebar.accountSet,
     };
   }
 
@@ -733,7 +917,17 @@ export class App implements vscode.Disposable {
   }
 
   private pushSidebar(): void {
-    this.sidebar.post({ type: "sidebar", state: this.sidebarState() });
+    const state = this.sidebarState();
+    this.sidebarCacheState = state;
+    this.sidebar.post({ type: "sidebar", state });
+    if (this.favoriteCacheDir) {
+      if (this.sidebarCacheTimer) clearTimeout(this.sidebarCacheTimer);
+    if (this.headsetGestureTimer) clearTimeout(this.headsetGestureTimer);
+      this.sidebarCacheTimer = setTimeout(() => {
+        this.sidebarCacheTimer = undefined;
+        void writeSidebarCache(this.favoriteCacheDir, state).catch(() => undefined);
+      }, 300);
+    }
   }
 
   // --------------------------------------------------------------- dispatch
@@ -840,10 +1034,38 @@ export class App implements vscode.Disposable {
           this.followingSong = false;
         }
         break;
+      case "resetImmersive": {
+        const cfg = vscode.workspace.getConfiguration("neteaseMusic");
+        await cfg.update("immersive.autoHideSidebar", true, vscode.ConfigurationTarget.Global);
+        await cfg.update("immersive.spectrum", true, vscode.ConfigurationTarget.Global);
+        await cfg.update("immersive.lyricSettings", true, vscode.ConfigurationTarget.Global);
+        await cfg.update("immersive.font", "Microsoft YaHei UI", vscode.ConfigurationTarget.Global);
+        await cfg.update("immersive.color", "#ffffff", vscode.ConfigurationTarget.Global);
+        await cfg.update("immersive.opacity", 0.92, vscode.ConfigurationTarget.Global);
+        await cfg.update("immersive.glow", true, vscode.ConfigurationTarget.Global);
+        this.lyricOffsets = {};
+        await fs.writeFile(path.join(this.lyricOffsetDir, "offsets.json"), "{}", "utf8").catch(() => undefined);
+        this.broadcast({ type: "immersiveConfig", config: getConfig().immersive });
+        this.broadcast({ type: "lyricOffset", trackId: this.player.state().track?.id ?? 0, offset: 0 });
+        this.pushSettings();
+        this.toast("沉浸歌词设置已恢复默认", "success");
+        break;
+      }
+      case "setLyricOffset": {
+        const trackId = Number(payload.trackId ?? 0);
+        const offset = Math.max(-10000, Math.min(10000, Math.round(Number(payload.offset ?? 0))));
+        if (!trackId) return;
+        if (offset) this.lyricOffsets[String(trackId)] = offset;
+        else delete this.lyricOffsets[String(trackId)];
+        await fs.mkdir(this.lyricOffsetDir, { recursive: true }).catch(() => undefined);
+        await fs.writeFile(path.join(this.lyricOffsetDir, "offsets.json"), JSON.stringify(this.lyricOffsets, null, 2), "utf8");
+        this.mainPanel.post({ type: "lyricOffset", trackId, offset });
+        break;
+      }
       case "immersive": {
         const active = Boolean(payload.active);
         try {
-          if (active && !this.immersiveSidebarHidden) {
+          if (active && getConfig().immersive.autoHideSidebar && !this.immersiveSidebarHidden) {
             await vscode.commands.executeCommand("workbench.action.closeSidebar");
             this.immersiveSidebarHidden = true;
           } else if (!active && this.immersiveSidebarHidden) {
@@ -943,6 +1165,9 @@ export class App implements vscode.Disposable {
       case "openLiked":
         await this.openLiked();
         break;
+      case "openAllMusic":
+        await this.openAllMusic();
+        break;
       case "openPlaylist":
         await this.openPlaylist(Number(payload.id));
         break;
@@ -1038,6 +1263,19 @@ export class App implements vscode.Disposable {
         const id = Number(payload.id ?? this.currentPage.playlist?.playlist.id ?? 0);
         if (!id) return;
         await this.session.client.playlistSubscribe(id, true);
+        const ref = this.currentPage.playlist?.playlist;
+        if (ref && !this.userPlaylists.some((playlist) => playlist.id === id)) {
+          this.userPlaylists.push({
+            id,
+            name: ref.name,
+            coverImgUrl: ref.coverImgUrl,
+            trackCount: ref.trackCount,
+            playCount: ref.playCount ?? 0,
+            subscribed: true,
+            creatorId: ref.creator?.userId ?? 0,
+          });
+          this.persistPlaylistPreload();
+        }
         this.toast("已收藏歌单", "success");
         await this.refreshUserPlaylists();
         break;
@@ -1073,6 +1311,11 @@ export class App implements vscode.Disposable {
         if (!id) return;
         if (id < 0) throw new Error("本地音乐没有关联的网易云歌曲，无法喜欢");
         const liked = await this.player.toggleLike(id);
+        const likedPlaylist = this.favoriteTargets().find((playlist) => playlist.specialType === 5);
+        if (likedPlaylist) this.updateFavoriteCacheMembership(likedPlaylist.id, id, liked);
+        if (this.currentPage.kind === "playlist" && this.currentPage.playlist?.playlist.id === 0) {
+          void this.openAllMusic().catch(() => undefined);
+        }
         this.settingsPanel.post({ type: "toast", kind: "success", message: liked ? "已添加到喜欢的音乐" : "已取消喜欢" });
         this.mainPanel.post({ type: "toast", kind: "success", message: liked ? "已添加到喜欢的音乐" : "已取消喜欢" });
         break;
@@ -1082,6 +1325,12 @@ export class App implements vscode.Disposable {
         break;
       case "favoriteTo":
         await this.addFavorite(Number(payload.playlistId), Number(payload.trackId));
+        break;
+      case "favoriteRemove":
+        await this.removeFavorite(Number(payload.playlistId), Number(payload.trackId));
+        break;
+      case "favoriteClosed":
+        this.favoritePickerOpen = false;
         break;
       case "removeFromPlaylist": {
         const playlistId = Number(payload.playlistId);
@@ -1158,6 +1407,10 @@ export class App implements vscode.Disposable {
       case "tab":
         if (surface === "settings") {
           this.settingsTab = String(payload.tab ?? "account");
+          if (this.settingsTab === "system") {
+            const playerState = this.player.state();
+            this.settingsPanel.post({ type: "outputState", output: playerState.output, actualQuality: playerState.actualQuality });
+          }
           break;
         }
         await this.setPageTab(String(payload.tab ?? "songs"));
@@ -1261,6 +1514,16 @@ export class App implements vscode.Disposable {
         if (key === "cache.maxSizeMB" || key === "cache.dir" || key === "cache.enabled") {
           await this.player.pruneCacheNow();
         }
+        if (key === "cache.libraryEnabled" || key === "cache.dir") {
+          await this.player.stop().catch(() => undefined);
+          const previousDir = this.favoriteCacheDir;
+          const nextDir = this.libraryCacheDir();
+          if (previousDir && previousDir !== nextDir) await this.clearLibraryCache(previousDir);
+          this.favoriteCacheDir = nextDir;
+          this.favoriteCache = nextDir ? await readFavoriteCache(nextDir) : emptyFavoriteCache();
+          this.sidebarCacheState = nextDir ? await readSidebarCache(nextDir) : undefined;
+          if (nextDir) await fs.mkdir(nextDir, { recursive: true }).catch(() => undefined);
+        }
         if (key === "playback.volume") {
           await this.player.setVolume(Number(payload.value) / 100);
         } else if (key === "playback.mode") {
@@ -1272,6 +1535,9 @@ export class App implements vscode.Disposable {
         else if (key.startsWith("lyricsOverlay.")) this.lyricsOverlay?.applyStyle(getConfig().lyricsOverlay);
         if ((key === "output.exclusive" || key === "output.bitPerfect") && payload.value === false) {
           await this.player.releaseNativeOutput();
+        }
+        if (key.startsWith("immersive.")) {
+          this.broadcast({ type: "immersiveConfig", config: getConfig().immersive });
         }
         if (key.startsWith("output.")) await this.player.refreshOutput();
         if ((key === "output.hrtf" || key === "output.bitPerfect" || key === "output.exclusive" || key === "output.backend" || key === "output.device") && this.player.isPlaying) {
@@ -1291,14 +1557,25 @@ export class App implements vscode.Disposable {
         });
         if (!picked?.[0]) return;
         const nextDir = picked[0].fsPath;
+        if (key === "cache.dir") {
+          await this.player.stop().catch(() => undefined);
+          if (this.favoriteCacheDir) await this.clearLibraryCache(this.favoriteCacheDir);
+        }
+        const targetDir = key === "cache.dir" ? path.join(nextDir, "songs") : nextDir;
         const previous = this.directoryForSetting(key);
-        if (previous && path.resolve(previous) !== path.resolve(nextDir)) {
-          await this.migrateDirectory(previous, nextDir, key);
+        if (previous && path.resolve(previous) !== path.resolve(targetDir)) {
+          await this.migrateDirectory(previous, targetDir, key);
         }
         await vscode.workspace
           .getConfiguration("neteaseMusic")
           .update(key, nextDir, vscode.ConfigurationTarget.Global);
-        await fs.mkdir(nextDir, { recursive: true }).catch(() => undefined);
+        await fs.mkdir(targetDir, { recursive: true }).catch(() => undefined);
+        if (key === "cache.dir") {
+          this.favoriteCacheDir = this.libraryCacheDir();
+          this.favoriteCache = this.favoriteCacheDir ? await readFavoriteCache(this.favoriteCacheDir) : emptyFavoriteCache();
+          this.sidebarCacheState = this.favoriteCacheDir ? await readSidebarCache(this.favoriteCacheDir) : undefined;
+          if (this.favoriteCacheDir) await fs.mkdir(this.favoriteCacheDir, { recursive: true }).catch(() => undefined);
+        }
         this.pushSettings();
         this.toast("目录已更新并迁移数据", "success");
         break;
@@ -1359,9 +1636,62 @@ export class App implements vscode.Disposable {
       case "restartApp":
         this.restartApp();
         break;
+      case "refreshLibraryCache":
+        await this.refreshUserPlaylists();
+        await this.syncFavoriteCache(this.favoriteTrackId);
+        await writeFavoriteCache(this.favoriteCacheDir, this.favoriteCache, true).catch(() => undefined);
+        this.toast("歌单缓存已刷新", "success");
+        break;
+      case "setHeadsetGesture": {
+        const index = Math.max(0, Math.min(6, Number(payload.index ?? 0)));
+        const current = getConfig().headset.gestures.map((gesture) => ({ ...gesture }));
+        if (!current[index]) return;
+        if (payload.type) current[index].type = String(payload.type) as any;
+        if (payload.count !== undefined) current[index].count = Math.max(1, Math.min(9, Number(payload.count)));
+        if (payload.action) current[index].action = String(payload.action) as any;
+        await vscode.workspace.getConfiguration("neteaseMusic").update("headset.gestures", current, vscode.ConfigurationTarget.Global);
+        this.settingsPanel.post({ type: "headsetGestures", gestures: current });
+        this.pushSettings();
+        break;
+      }
+      case "resetHeadset":
+        await vscode.workspace.getConfiguration("neteaseMusic").update("headset.gestures", undefined, vscode.ConfigurationTarget.Global);
+        this.settingsPanel.post({ type: "headsetGestures", gestures: getConfig().headset.gestures });
+        this.pushSettings();
+        this.toast("单按钮耳机控制已恢复默认", "success");
+        break;
+      case "setSidebarItem": {
+        const key = String(payload.key ?? "");
+        const visible = Boolean(payload.visible);
+        const current = [...getConfig().sidebar.visible];
+        const next = visible ? [...new Set([...current, key])] : current.filter((item) => item !== key);
+        await vscode.workspace.getConfiguration("neteaseMusic").update("sidebar.visible", next, vscode.ConfigurationTarget.Global);
+        if (key === "account") await vscode.workspace.getConfiguration("neteaseMusic").update("sidebar.accountSet", true, vscode.ConfigurationTarget.Global);
+        this.settingsPanel.post({ type: "sidebarVisible", keys: next });
+        this.pushSidebar();
+        this.pushSettings();
+        break;
+      }
+      case "moveSortPriority": {
+        const key = String(payload.key ?? "");
+        const direction = Number(payload.direction ?? 0);
+        const current = [...getConfig().list.sortPriority];
+        const index = current.indexOf(key as SortKey);
+        const target = index + direction;
+        if (index < 0 || target < 0 || target >= current.length) return;
+        [current[index], current[target]] = [current[target], current[index]];
+        await vscode.workspace.getConfiguration("neteaseMusic").update("list.sortPriority", current, vscode.ConfigurationTarget.Global);
+        this.broadcast({ type: "sortPriority", keys: current });
+        this.pushSettings();
+        break;
+      }
+      case "refreshRecommendCache":
+        await this.openRecommend(true);
+        this.toast("推荐缓存已刷新", "success");
+        break;
       case "clearCache": {
         const cfg = getConfig();
-        const dir = cfg.cache.dir || defaultCacheDir(this.ctx);
+        const dir = audioCacheDir(this.ctx, cfg.cache.dir);
         await fs.mkdir(dir, { recursive: true }).catch(() => undefined);
         let removed = 0;
         let failed = 0;
@@ -1382,7 +1712,7 @@ export class App implements vscode.Disposable {
         const kind = String(payload.dir ?? "");
         const cfg = getConfig();
         const map: Record<string, string> = {
-          cache: cfg.cache.dir || defaultCacheDir(this.ctx),
+          cache: audioCacheDir(this.ctx, cfg.cache.dir),
           download: this.downloads.dir,
           cover: cfg.cover.dir || path.join(this.downloads.dir, "covers"),
           local: cfg.localMusic.dir || this.downloads.dir,
@@ -1455,9 +1785,18 @@ export class App implements vscode.Disposable {
     if (this.currentPage.loading || !this.currentPage.kind) await this.openRecommend();
   }
 
-  private async openRecommend(): Promise<void> {
+  private async openRecommend(force = false): Promise<void> {
     this.activeNav = "recommend";
     this.pushSidebar();
+    const accountId = this.session.accountInfo?.userId ?? 0;
+    if (!force && accountId) {
+      const cached = this.favoriteCacheDir ? await readRecommendCache(this.favoriteCacheDir, accountId) : undefined;
+      if (cached && this.activeNav === "recommend") {
+        this.setPage({ kind: "recommend", title: "推荐", home: cached });
+        this.mainPanel.createOrShow();
+        return;
+      }
+    }
     this.setPage({ kind: "recommend", title: "推荐", loading: true });
     this.mainPanel.createOrShow();
     const [personalized, newSongs, dailySongs, toplists, radios, roamSongs, followedArtists] =
@@ -1481,6 +1820,7 @@ export class App implements vscode.Disposable {
     };
     if (this.activeNav !== "recommend") return;
     this.setPage({ kind: "recommend", title: "推荐", home });
+    if (accountId) void writeRecommendCache(this.favoriteCacheDir, accountId, home).catch(() => undefined);
     this.localCount = this.localTracks.length;
   }
 
@@ -1689,8 +2029,110 @@ export class App implements vscode.Disposable {
     await this.openPlaylist(liked.id);
   }
 
+  private allMusicTargets(): UserPlaylist[] {
+    const source = this.userPlaylists.length ? this.userPlaylists : this.favoriteCache.playlists;
+    return source
+      .filter((playlist) => playlist.specialType === 5 || !playlist.subscribed)
+      .sort((a, b) => (a.specialType === 5 ? 0 : 1) - (b.specialType === 5 ? 0 : 1));
+  }
+
+  private cachedAllMusicTracks(targets: UserPlaylist[]): Track[] {
+    const tracks: Track[] = [];
+    const seen = new Set<number>();
+    for (const playlist of targets) {
+      for (const track of this.favoriteCache.entries[String(playlist.id)]?.tracks ?? []) {
+        if (seen.has(track.id)) continue;
+        seen.add(track.id);
+        tracks.push(track);
+      }
+    }
+    return tracks;
+  }
+
+  private allMusicPage(tracks: Track[]): void {
+    const targets = this.allMusicTargets();
+    const liked = targets.find((playlist) => playlist.specialType === 5);
+    const cover = liked?.coverImgUrl || targets.find((playlist) => playlist.coverImgUrl)?.coverImgUrl || "";
+    const virtualPlaylist: PlaylistRef = {
+      id: 0,
+      name: "全部音乐",
+      coverImgUrl: cover,
+      description: "我喜欢的音乐 + 创建的歌单",
+      trackCount: tracks.length,
+    };
+    this.activePlaylist = { playlist: virtualPlaylist, tracks };
+    this.commentsTarget = undefined;
+    this.commentsView = undefined;
+    this.subscribersView = undefined;
+    this.setPage({ kind: "playlist", title: "全部音乐", playlist: this.activePlaylist, activeTab: "songs" });
+  }
+
+  private async refreshAllMusic(targets: UserPlaylist[]): Promise<void> {
+    const details = await Promise.all(targets.map((playlist) =>
+      this.session.client.playlistDetail(playlist.id).catch(() => null),
+    ));
+    const tracks: Track[] = [];
+    const seen = new Set<number>();
+    for (const detail of details) {
+      if (!detail) continue;
+      setCachedTracks(this.favoriteCache, detail.playlist.id, detail.tracks);
+      this.playlistCache.set(detail.playlist.id, detail);
+      for (const track of detail.tracks) {
+        if (seen.has(track.id)) continue;
+        seen.add(track.id);
+        tracks.push(track);
+      }
+    }
+    await writeFavoriteCache(this.favoriteCacheDir, this.favoriteCache).catch(() => undefined);
+    if (this.currentPage.kind === "playlist" && this.currentPage.playlist?.playlist.id === 0) {
+      this.allMusicPage(tracks);
+    }
+  }
+
+  private async openAllMusic(): Promise<void> {
+    const targets = this.allMusicTargets();
+    if (!targets.length) {
+      await this.refreshUserPlaylists().catch(() => undefined);
+    }
+    const finalTargets = this.allMusicTargets();
+    if (!finalTargets.length) {
+      await this.openLogin();
+      return;
+    }
+    this.mainPanel.createOrShow();
+    this.activeNav = "all";
+    this.pushSidebar();
+    const cached = this.favoriteCacheDir ? this.cachedAllMusicTracks(finalTargets) : [];
+    if (cached.length) {
+      this.allMusicPage(cached);
+      void this.refreshAllMusic(finalTargets).catch(() => undefined);
+      return;
+    }
+    await this.refreshAllMusic(finalTargets);
+  }
+
   private async openPlaylist(id: number): Promise<void> {
+    if (id === 0) {
+      await this.openAllMusic();
+      return;
+    }
     if (!Number.isFinite(id) || id <= 0) throw new Error("无效的歌单 ID");
+    const cachedMeta = this.userPlaylists.find((playlist) => playlist.id === id)
+      ?? this.favoriteCache.playlists.find((playlist) => playlist.id === id);
+    const cachedTracks = this.favoriteCacheDir ? this.favoriteCache.entries[String(id)]?.tracks : undefined;
+    if (cachedMeta && cachedTracks?.length) {
+      const detail: PlaylistDetail = { playlist: this.toPlaylistRef(cachedMeta), tracks: cachedTracks };
+      this.activePlaylist = detail;
+      this.activeNav = cachedMeta.specialType === 5 ? "liked" : `playlist:${id}`;
+      this.pushSidebar();
+      this.mainPanel.createOrShow();
+      this.commentsTarget = { resource: commentResource("playlist", id), id, kind: "playlist" };
+      this.commentsView = undefined;
+      this.subscribersView = undefined;
+      this.setPage({ kind: "playlist", title: detail.playlist.name, playlist: detail, activeTab: "songs" });
+      void this.refreshPlaylistCache(id).catch(() => undefined);
+      return;
+    }
     const liked = this.userPlaylists.find((playlist) => playlist.specialType === 5);
     const cached = this.playlistCache.get(id);
     if (cached) {
@@ -1735,6 +2177,17 @@ export class App implements vscode.Disposable {
       playlist: detail,
       activeTab: "songs",
     });
+  }
+
+  private async refreshPlaylistCache(id: number): Promise<void> {
+    const detail = await this.session.client.playlistDetail(id);
+    setCachedTracks(this.favoriteCache, id, detail.tracks);
+    this.playlistCache.set(id, detail);
+    void writeFavoriteCache(this.favoriteCacheDir, this.favoriteCache).catch(() => undefined);
+    if (this.currentPage.kind === "playlist" && this.currentPage.playlist?.playlist.id === id) {
+      this.activePlaylist = detail;
+      this.setPage({ kind: "playlist", title: detail.playlist.name, playlist: detail, activeTab: this.currentPage.activeTab ?? "songs" });
+    }
   }
 
   private async ensurePlaylist(id: number): Promise<PlaylistDetail | null> {
@@ -1838,6 +2291,52 @@ export class App implements vscode.Disposable {
     });
   }
 
+  private async migrateLegacyAudioCache(): Promise<void> {
+    const cfg = getConfig();
+    const target = audioCacheDir(this.ctx, cfg.cache.dir);
+    const legacy = [
+      path.join(this.ctx.globalStorageUri.fsPath, "cache", "audio"),
+      cfg.cache.dir || path.join(this.ctx.globalStorageUri.fsPath, "cache"),
+    ];
+    for (const dir of [...new Set(legacy)]) {
+      if (path.resolve(dir) === path.resolve(target)) continue;
+      await this.migrateDirectory(dir, target, "cache.dir");
+    }
+  }
+
+  private libraryCacheDir(): string {
+    const cfg = getConfig();
+    if (!cfg.cache.libraryEnabled) return "";
+    return path.join(cfg.cache.dir || defaultCacheDir(this.ctx), "library");
+  }
+
+  private async clearLibraryCache(dir: string): Promise<void> {
+    if (!dir) return;
+    await fs.rm(path.join(dir, "netease-recommend.json"), { force: true }).catch(() => undefined);
+    await fs.rm(path.join(dir, "netease-recommend.csv"), { force: true }).catch(() => undefined);
+    await fs.rm(path.join(dir, "netease-sidebar.json"), { force: true }).catch(() => undefined);
+    await fs.rm(path.join(dir, "netease-sidebar.csv"), { force: true }).catch(() => undefined);
+    await fs.rm(path.join(dir, "netease-favorites.json"), { force: true }).catch(() => undefined);
+    await fs.rm(path.join(dir, "netease-favorites.csv"), { force: true }).catch(() => undefined);
+    await fs.rm(path.join(dir, "netease-library.csv"), { force: true }).catch(() => undefined);
+  }
+
+  private cacheTargets(): UserPlaylist[] {
+    return this.userPlaylists.length ? this.userPlaylists : this.favoriteCache.playlists;
+  }
+
+  private favoriteTargets(): UserPlaylist[] {
+    const source = this.userPlaylists.length ? this.userPlaylists : this.favoriteCache.playlists;
+    return source.filter((playlist) => playlist.specialType === 5 || !playlist.subscribed);
+  }
+
+  private favoriteEntries(trackId: number) {
+    return this.favoriteTargets().map((playlist) => ({
+      playlist: this.toPlaylistRef(playlist),
+      contains: this.favoriteCacheDir ? cacheContains(this.favoriteCache, playlist.id, trackId) : false,
+    }));
+  }
+
   private async openFavorite(trackId: number, toggle = false): Promise<void> {
     if (!trackId) throw new Error("无效的歌曲 ID");
     if (trackId < 0) throw new Error("本地音乐没有关联的网易云歌曲，无法收藏到歌单");
@@ -1845,18 +2344,74 @@ export class App implements vscode.Disposable {
       await this.openLogin();
       return;
     }
-    if (!this.userPlaylists.length) await this.refreshUserPlaylists();
-    const playlists = this.userPlaylists
-      .filter((playlist) => playlist.specialType !== 5)
-      .map((playlist) => this.toPlaylistRef(playlist));
+    if (!this.userPlaylists.length) {
+      void this.refreshUserPlaylists().catch(() => undefined);
+    }
+    this.favoriteTrackId = trackId;
+    this.favoritePickerOpen = true;
     this.mainPanel.createOrShow();
-    this.mainPanel.post({ type: toggle ? "toggleFavoritePicker" : "favoritePicker", trackId, playlists });
+    this.mainPanel.post({
+      type: toggle ? "toggleFavoritePicker" : "favoritePicker",
+      trackId,
+      playlists: this.favoriteEntries(trackId),
+    });
+    void this.syncFavoriteCache(trackId).catch(() => undefined);
+  }
+
+  private async syncFavoriteCache(trackId: number): Promise<void> {
+    if (this.favoriteSyncing || !this.session.loggedIn) return;
+    const targets = this.cacheTargets();
+    if (!targets.length) return;
+    this.favoriteSyncing = true;
+    try {
+      let changed = false;
+      await Promise.all(targets.map(async (playlist) => {
+        try {
+          const detail = await this.session.client.playlistDetail(playlist.id);
+          this.playlistCache.set(playlist.id, detail);
+          setCachedTracks(this.favoriteCache, playlist.id, detail.tracks);
+          changed = true;
+        } catch {
+          /* keep previous cache */
+        }
+      }));
+      if (changed) await writeFavoriteCache(this.favoriteCacheDir, this.favoriteCache).catch(() => undefined);
+      if (trackId && this.favoritePickerOpen && this.favoriteTrackId === trackId && this.mainPanel.isReady) {
+        this.mainPanel.post({ type: "favoritePicker", trackId, playlists: this.favoriteEntries(trackId) });
+      }
+    } finally {
+      this.favoriteSyncing = false;
+    }
+  }
+
+  private updateFavoriteCacheMembership(playlistId: number, trackId: number, contains: boolean): void {
+    const entry = this.favoriteCache.entries[String(playlistId)];
+    if (!entry) return;
+    const ids = new Set(entry.trackIds);
+    if (contains) ids.add(trackId);
+    else ids.delete(trackId);
+    entry.trackIds = [...ids];
+    entry.updatedAt = Date.now();
+    void writeFavoriteCache(this.favoriteCacheDir, this.favoriteCache).catch(() => undefined);
+  }
+
+  private async removeFavorite(playlistId: number, trackId: number): Promise<void> {
+    if (!playlistId || !trackId) throw new Error("请选择歌单");
+    this.playlistCache.delete(playlistId);
+    await this.session.client.removeTrackFromPlaylist(playlistId, trackId);
+    this.updateFavoriteCacheMembership(playlistId, trackId, false);
+    this.updatePlaylistTrackCount(playlistId, -1);
+    this.toast("已取消收藏", "success");
+    this.mainPanel.post({ type: "toast", kind: "success", message: "已取消收藏" });
+    await this.openFavorite(trackId);
   }
 
   private async addFavorite(playlistId: number, trackId: number): Promise<void> {
     if (!playlistId || !trackId) throw new Error("请选择歌单");
     this.playlistCache.delete(playlistId);
     await this.session.client.addTrackToPlaylist(playlistId, trackId);
+    this.updateFavoriteCacheMembership(playlistId, trackId, true);
+    this.updatePlaylistTrackCount(playlistId, 1);
     this.toast("已收藏到歌单", "success");
     this.mainPanel.post({ type: "toast", kind: "success", message: "已收藏到歌单" });
     void this.refreshUserPlaylists().catch(() => undefined);
@@ -2074,9 +2629,9 @@ export class App implements vscode.Disposable {
     const page = this.currentPage;
     page.activeTab = tab === "comments" ? "comments" : tab === "subscribers" ? "subscribers" : "songs";
     this.setPage(page);
-    if (page.activeTab === "comments" && this.commentsTarget) {
+    if (page.activeTab === "comments" && this.commentsTarget && page.playlist?.playlist.id !== 0) {
       await this.openComments({ resource: this.commentsTarget.resource, id: this.commentsTarget.id, offset: 0 });
-    } else if (page.activeTab === "subscribers" && page.playlist) {
+    } else if (page.activeTab === "subscribers" && page.playlist && page.playlist.playlist.id > 0) {
       await this.openSubscribers(page.playlist.playlist.id);
     }
   }
@@ -2152,7 +2707,8 @@ export class App implements vscode.Disposable {
   private async refreshCurrentPage(): Promise<void> {
     switch (this.currentPage.kind) {
       case "playlist":
-        if (this.currentPage.playlist) await this.openPlaylist(this.currentPage.playlist.playlist.id);
+        if (this.currentPage.playlist?.playlist.id === 0) await this.openAllMusic();
+        else if (this.currentPage.playlist) await this.openPlaylist(this.currentPage.playlist.playlist.id);
         break;
       case "song":
         if (this.currentPage.song) await this.openSongDetail(this.currentPage.song.track.id);
@@ -2170,6 +2726,9 @@ export class App implements vscode.Disposable {
         if (this.currentPage.search) {
           await this.openSearch(this.currentPage.search.query, this.currentPage.search.kind);
         }
+        break;
+      case "recommend":
+        await this.openRecommend(true);
         break;
       case "featured":
         await this.openFeatured();
@@ -2276,9 +2835,38 @@ export class App implements vscode.Disposable {
       formerSongId: Number(command.formerSongId ?? command.targetSongId ?? 0),
       clientSeq: Number(command.clientSeq ?? 0),
     };
-    this.listenList = (room.playlist?.displayList?.result ?? [])
-      .map((item) => Number(typeof item === "object" ? item.songId : item))
-      .filter((id) => Number.isFinite(id) && id > 0);
+    if (this.listenPending && trackId === this.listenPending.targetSongId) {
+      this.listenPending = undefined;
+    }
+    if (this.listenPending && Date.now() - this.listenPending.at < 10000 && trackId !== this.listenPending.targetSongId) {
+      const local = this.player.current;
+      this.listen = {
+        status: "connected",
+        roomId: this.listenRoomId,
+        inviterId: this.listen.inviterId,
+        trackId: this.listenPending.targetSongId,
+        trackName: this.listenPending.trackName ?? local?.name,
+        artists: this.listenPending.artists ?? local?.artists?.map((artist) => artist.name).join(" / ") ?? "",
+        position: this.player.state().position,
+        playing: this.player.state().playing,
+        message: "已发起切歌，等待房间同步完成",
+      };
+      this.pushSidebar();
+      return;
+    }
+    const roomPlaylist = (room.playlist ?? {}) as any;
+    const candidateLists = [
+      roomPlaylist.displayList?.result,
+      roomPlaylist.displayList,
+      roomPlaylist.randomList,
+      roomPlaylist.list,
+      roomPlaylist.songList,
+    ].filter(Array.isArray);
+    const roomIds = candidateLists
+      .flat()
+      .map((item: any) => Number(typeof item === "object" ? item?.songId ?? item?.id : item))
+      .filter((id: number) => Number.isFinite(id) && id > 0);
+    this.listenList = [...new Set(roomIds)];
     this.listenVersions = (room.playlist?.version ?? []).map((item) => ({ userId: Number(item.userId), version: Number(item.version) }));
     this.listenPlayMode = String(room.playlist?.playMode ?? "ORDER_LOOP");
     const listKey = this.listenList.join(",");
@@ -2290,16 +2878,31 @@ export class App implements vscode.Disposable {
         this.listenQueue = [];
       }
     }
+    for (const localTrack of this.player.getQueue()) {
+      if (!this.listenQueue.some((item) => item.id === localTrack.id)) this.listenQueue.push(localTrack);
+    }
 
     let trackName = "";
     let artists = "";
-    let track = this.listenTrack?.id === trackId ? this.listenTrack : undefined;
+    let track = this.listenTrack?.id === trackId
+      ? this.listenTrack
+      : this.listenQueue.find((item) => item.id === trackId);
     if (trackId && !track) {
       try {
         track = (await this.session.client.songDetail([trackId]))[0];
         this.listenTrack = track;
       } catch {
         /* metadata is optional */
+      }
+    }
+    const targetSongName = String((command as any).targetSongName ?? (command as any).songName ?? "").trim();
+    if (!track && targetSongName) {
+      try {
+        const found = await this.session.client.search(targetSongName, "song", 1, 0);
+        track = found.songs[0];
+        if (track) this.listenTrack = track;
+      } catch {
+        /* name fallback is best effort */
       }
     }
     if (track) {
@@ -2313,10 +2916,8 @@ export class App implements vscode.Disposable {
       String(rawStatus ?? "") === "2" ||
       String(rawStatus ?? "").toUpperCase().startsWith("PLAY");
     const now = Date.now();
-    const rawProgressChanged = Boolean(
-      this.listenLastProgress !== undefined &&
-      Math.abs(baseProgress - this.listenLastProgress) > 1.5,
-    );
+    const progressDelta = this.listenLastProgress === undefined ? 0 : Math.abs(baseProgress - this.listenLastProgress);
+    const rawProgressChanged = progressDelta > 0.25;
     this.listenLastProgress = baseProgress;
     if (
       !this.listenBase ||
@@ -2324,11 +2925,46 @@ export class App implements vscode.Disposable {
       this.listenBase.playing !== playing ||
       rawProgressChanged
     ) {
-      if (rawProgressChanged) this.listenForceSeek = true;
+      if (progressDelta > 2.5) this.listenForceSeek = true;
       this.listenBase = { trackId, progress: baseProgress, at: now, playing };
     }
     const target = baseProgress + (playing ? (now - this.listenBase.at) / 1000 : 0);
-    if (track) await this.syncListenPlayback(track, target, playing);
+    if (track) {
+      if (this.listenFailedTrackId === track.id && Date.now() < this.listenRetryAt) {
+        this.listen = {
+          status: "connected",
+          roomId: this.listenRoomId,
+          inviterId: this.listen.inviterId,
+          trackId: trackId || undefined,
+          trackName: trackName || (trackId ? `歌曲 ${trackId}` : undefined),
+          artists,
+          position: target,
+          playing,
+          message: "目标歌曲暂时不可用，已暂停自动切歌，稍后重试",
+        };
+        this.pushSidebar();
+        return;
+      }
+      try {
+        await this.syncListenPlayback(track, target, playing);
+      } catch (err) {
+        this.listenFailedTrackId = track.id;
+        this.listenRetryAt = Date.now() + 15000;
+        this.listen = {
+          status: "connected",
+          roomId: this.listenRoomId,
+          inviterId: this.listen.inviterId,
+          trackId,
+          trackName: trackName || track.name,
+          artists,
+          position: target,
+          playing,
+          message: `无法播放「${track.name}」，已暂停自动切歌：${(err as Error).message}`,
+        };
+        this.pushSidebar();
+        return;
+      }
+    }
     this.listen = {
       status: "connected",
       roomId: this.listenRoomId,
@@ -2370,8 +3006,12 @@ export class App implements vscode.Disposable {
         await new Promise((resolve) => setTimeout(resolve, 1500));
       }
       if (!(await this.sendListenPlayCommand("GOTO", track.id))) return false;
-      const queue = this.listenQueue.length ? this.listenQueue : [track];
-      const index = Math.max(0, queue.findIndex((item) => item.id === track.id));
+      const queue = [...(this.listenQueue.length ? this.listenQueue : [track])];
+      let index = queue.findIndex((item) => item.id === track.id);
+      if (index < 0) {
+        queue.push(track);
+        index = queue.length - 1;
+      }
       await this.player.playTrack(track, queue, index);
       return true;
     } catch (err) {
@@ -2405,6 +3045,15 @@ export class App implements vscode.Disposable {
       try {
         await this.session.client.listenTogetherPlayCommand(this.listenRoomId, command);
         this.listenCommand = { targetSongId: target, formerSongId: former, clientSeq };
+        if (commandType === "GOTO") {
+          const queued = this.listenQueue.find((item) => item.id === target) ?? this.player.current;
+          this.listenPending = {
+            targetSongId: target,
+            at: Date.now(),
+            trackName: queued?.name,
+            artists: queued?.artists?.map((artist) => artist.name).join(" / "),
+          };
+        }
         return true;
       } catch (err) {
         lastError = err;
@@ -2438,8 +3087,13 @@ export class App implements vscode.Disposable {
   private async syncListenPlayback(track: Track, target: number, playing: boolean): Promise<void> {
     const current = this.player.current;
     if (!current || current.id !== track.id) {
-      const queue = this.listenQueue.length ? this.listenQueue : [track];
-      const index = Math.max(0, queue.findIndex((item) => item.id === track.id));
+      const queue = [...(this.listenQueue.length ? this.listenQueue : [track])];
+      let index = queue.findIndex((item) => item.id === track.id);
+      if (index < 0) {
+        queue.push(track);
+        index = queue.length - 1;
+      }
+      this.listenQueue = queue;
       await this.player.playTrack(track, queue, index);
       if (!playing) await this.player.pause();
       if (target > 0.5) await this.player.seek(target);
@@ -2498,7 +3152,19 @@ export class App implements vscode.Disposable {
     const name = await vscode.window.showInputBox({ prompt: "新建歌单名称", placeHolder: "歌单名称" });
     if (!name?.trim()) return;
     const id = await this.session.client.createPlaylist(name.trim());
-    if (id) this.playlistOrder.push(id);
+    if (id) {
+      this.playlistOrder.push(id);
+      this.userPlaylists.push({
+        id,
+        name: name.trim(),
+        coverImgUrl: "",
+        trackCount: 0,
+        playCount: 0,
+        subscribed: false,
+        creatorId: this.session.accountInfo?.userId ?? 0,
+      });
+      this.persistPlaylistPreload();
+    }
     await this.savePlaylistOrder();
     await this.refreshUserPlaylists();
     this.toast(`已创建歌单：${name.trim()}`, "success");
@@ -2510,6 +3176,8 @@ export class App implements vscode.Disposable {
     const answer = await vscode.window.showWarningMessage(`删除歌单「${playlist.name}」？`, { modal: true }, "删除");
     if (answer !== "删除") return;
     await this.session.client.deletePlaylist(id);
+    this.userPlaylists = this.userPlaylists.filter((item) => item.id !== id);
+    this.persistPlaylistPreload();
     this.playlistOrder = this.playlistOrder.filter((item) => item !== id);
     await this.savePlaylistOrder();
     await this.refreshUserPlaylists();
@@ -2541,7 +3209,33 @@ export class App implements vscode.Disposable {
     await this.ctx.globalState.update(PLAYLIST_ORDER_KEY, this.playlistOrder);
   }
 
-  private async refreshUserPlaylists(): Promise<void> {    if (!this.session.loggedIn || !this.session.accountInfo?.userId) {
+  private playlistSignature(): string {
+    return this.userPlaylists
+      .map((playlist) => [playlist.id, playlist.name, playlist.trackCount, playlist.coverImgUrl, playlist.subscribed ? 1 : 0].join(":"))
+      .sort()
+      .join("|");
+  }
+
+  private persistPlaylistPreload(): void {
+    this.favoriteCache.playlists = this.userPlaylists;
+    void writeFavoriteCache(this.favoriteCacheDir, this.favoriteCache).catch(() => undefined);
+    this.sidebarCacheState = this.sidebarState();
+    if (this.favoriteCacheDir) {
+      void writeSidebarCache(this.favoriteCacheDir, this.sidebarCacheState).catch(() => undefined);
+    }
+    this.pushSidebar();
+  }
+
+  private updatePlaylistTrackCount(playlistId: number, delta: number): void {
+    const playlist = this.userPlaylists.find((item) => item.id === playlistId);
+    if (!playlist) return;
+    playlist.trackCount = Math.max(0, playlist.trackCount + delta);
+    this.persistPlaylistPreload();
+  }
+
+  private async refreshUserPlaylists(): Promise<void> {
+    const beforeSignature = this.playlistSignature();
+    if (!this.session.loggedIn || !this.session.accountInfo?.userId) {
       this.userPlaylists = [];
       this.playlistsLoaded = true;
       this.pushSidebar();
@@ -2562,7 +3256,19 @@ export class App implements vscode.Disposable {
       log.warn("user playlists failed", String(err));
       if (!this.playlistsLoaded) this.userPlaylists = [];
     }
-    this.pushSidebar();
+    this.favoriteCache.playlists = this.userPlaylists;
+    void this.syncPlaylistCovers(this.userPlaylists).catch(() => undefined);
+    if (beforeSignature !== this.playlistSignature()) {
+      this.persistPlaylistPreload();
+    } else {
+      this.sidebarCacheState = this.sidebarState();
+      if (this.favoriteCacheDir) void writeSidebarCache(this.favoriteCacheDir, this.sidebarCacheState).catch(() => undefined);
+      this.pushSidebar();
+    }
+    void this.syncFavoriteCache(this.favoriteTrackId).catch(() => undefined);
+    if (this.userPlaylists.length && this.currentPage.kind === "playlist" && this.currentPage.playlist?.playlist.id === 0) {
+      void this.openAllMusic();
+    }
   }
 
   // ------------------------------------------------------------------ login
@@ -2848,7 +3554,7 @@ export class App implements vscode.Disposable {
       if (picked.backend) await configuration.update("output.backend", picked.backend, vscode.ConfigurationTarget.Global);
       const chosen = devices.find((device) => device.id === picked.deviceId);
       const bluetooth = Boolean(chosen && /bluetooth|蓝牙|hands-free|airpods|buds|wh-1000|wf-1000/i.test(chosen.name));
-      await configuration.update("output.mode", bluetooth ? "webaudio" : "native", vscode.ConfigurationTarget.Global);
+      await configuration.update("output.mode", "native", vscode.ConfigurationTarget.Global);
       await configuration.update("output.exclusive", !bluetooth, vscode.ConfigurationTarget.Global);
       await configuration.update("output.bitPerfect", !bluetooth, vscode.ConfigurationTarget.Global);
       if (!bluetooth) await configuration.update("output.hrtf", false, vscode.ConfigurationTarget.Global);
@@ -3599,6 +4305,8 @@ private async pickPlaybackRate(): Promise<void> {
     this.stopQr();
     this.smtc?.stop();
     if (this.marqueeTimer) clearInterval(this.marqueeTimer);
+    if (this.favoriteSyncTimer) clearInterval(this.favoriteSyncTimer);
+    if (this.sidebarCacheTimer) clearTimeout(this.sidebarCacheTimer);
     if (this.sleepTimer) clearTimeout(this.sleepTimer);
     for (const item of this.statusItems) item.dispose();
     for (const disposable of this.disposables) disposable.dispose();
