@@ -10,7 +10,7 @@ $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 $pkg = Get-Content (Join-Path $root "package.json") -Raw | ConvertFrom-Json
 $version = $pkg.version
-$targets = @("win32-x64", "win32-arm64")
+$targets = @("win32-x64", "win32-arm64", "linux-x64", "linux-arm64")
 
 if (-not (Test-Path $TokenFile)) {
   throw "Missing Marketplace PAT file: $TokenFile"
