@@ -1,5 +1,6 @@
 import "./webview.css";
-import type { Account, AlbumDetail, ArtistDetail, Comment, PlaylistRef, SongPage, Track, UserPage } from "../api/types";
+import type { Account, AlbumDetail, ArtistDetail, Comment, FavoritePickerEntry, PlaylistRef, SongPage, Track, UserPage } from "../api/types";
+import type { ImmersiveConfig, SortKey } from "../config";
 import type { PlaybackSource } from "../protocol";
 import { parseLrc } from "../api/normalize";
 import type {
@@ -52,6 +53,9 @@ let account: Account | null = null;
 let queue: Track[] = [];
 let queueSources: Array<PlaybackSource | null> = [];
 let page: PageView = { kind: "recommend", title: "推荐", loading: true };
+let sortPriority: SortKey[] = ["artist", "album", "title", "duration", "liked"];
+let immersiveConfig: ImmersiveConfig = { autoHideSidebar: true, spectrum: true, lyricSettings: true, font: "Microsoft YaHei UI", color: "#ffffff", opacity: 0.92, glow: true };
+const lyricOffsets = new Map<number, number>();
 let comments: CommentsView | null = null;
 let subscribers: SubscribersView | null = null;
 let downloads: import("../protocol").DownloadTaskView[] = [];
@@ -99,29 +103,43 @@ let queueAutoLocateTimer: ReturnType<typeof setTimeout> | undefined;
 let queueAutoLocateBusy = false;
 let queueWasOpen = false;
 let queueAutoBound = false;
-let favoritePicker: { trackId: number; playlists: PlaylistRef[] } | null = null;
-let playlistSort: Array<{ key: "title" | "artist" | "album" | "duration"; dir: 1 | -1 }> = [];
+let favoritePicker: { trackId: number; playlists: FavoritePickerEntry[] } | null = null;
+let playlistSort: Array<{ key: SortKey; dir: 1 | -1 }> = [];
 let playlistLikeOrder: LikeOrder = "none";
 let playlistQuery = "";
 let playlistSortId = 0;
 let artistTab: "songs" | "albums" | "detail" | "similar" = "songs";
 let artistTabId = 0;
-let artistAllSort: Array<{ key: "title" | "artist" | "album" | "duration"; dir: 1 | -1 }> = [];
+let artistAllSort: Array<{ key: SortKey; dir: 1 | -1 }> = [];
 let artistAllLikeOrder: LikeOrder = "none";
 let artistAllQuery = "";
 let artistAllSortId = 0;
-let artistPreviewSort: Array<{ key: "title" | "artist" | "album" | "duration"; dir: 1 | -1 }> = [];
+let artistPreviewSort: Array<{ key: SortKey; dir: 1 | -1 }> = [];
 let artistPreviewLikeOrder: LikeOrder = "none";
 let artistPreviewSortId = 0;
 let coverPreview: { url: string; name: string; artist: string } | null = null;
 let pendingLocate = false;
-let genericSort: Record<string, { key: "title" | "artist" | "album" | "duration"; dir: 1 | -1 }> = {};
+let genericSort: Record<string, { key: SortKey; dir: 1 | -1 }> = {};
+let genericLike: Record<string, LikeOrder> = {};
 let commentsLoadingMore = false;
 
 type LikeOrder = "none" | "first" | "last";
 function nextLikeOrder(order: LikeOrder): LikeOrder {
   return order === "none" ? "first" : order === "first" ? "last" : "none";
 }
+function prioritizedSorts(
+  sorts: Array<{ key: SortKey; dir: 1 | -1 }>,
+  likeOrder: LikeOrder,
+): Array<{ key: SortKey; dir: 1 | -1 }> {
+  return sortPriority.flatMap((key) => {
+    if (key === "liked") {
+      return likeOrder === "none" ? [] : [{ key: "liked" as SortKey, dir: likeOrder === "first" ? -1 : 1 }];
+    }
+    const entry = sorts.find((item) => item.key === key);
+    return entry ? [entry] : [];
+  });
+}
+
 function likeOrderMark(order: LikeOrder): string {
   return order === "first" ? " ↑" : order === "last" ? " ↓" : "";
 }
@@ -527,11 +545,18 @@ function trackRow(track: Track, index: number, kind: string, options: { remove?:
 
 function sortGenericTracks(kind: string, tracks: Track[]): Track[] {
   const sort = genericSort[kind];
-  if (!sort) return tracks;
+  const likeOrder = genericLike[kind] ?? "none";
+  if (!sort && likeOrder === "none") return tracks;
   const copy = tracks.slice();
   copy.sort((a, b) => {
     let result = 0;
-    if (sort.key === "title") result = a.name.localeCompare(b.name, "zh-CN");
+    if (likeOrder !== "none") {
+      result = (Number(isLiked(a)) - Number(isLiked(b))) * (likeOrder === "first" ? -1 : 1);
+      if (result) return result * (sort?.key === "liked" ? sort.dir : 1);
+    }
+    if (!sort) return a.id - b.id;
+    if (sort.key === "liked") result = Number(isLiked(a)) - Number(isLiked(b));
+    else if (sort.key === "title") result = a.name.localeCompare(b.name, "zh-CN");
     else if (sort.key === "artist") result = (a.artists[0]?.name ?? "").localeCompare(b.artists[0]?.name ?? "", "zh-CN");
     else if (sort.key === "album") result = (a.album?.name ?? "").localeCompare(b.album?.name ?? "", "zh-CN");
     else result = (a.duration ?? 0) - (b.duration ?? 0);
@@ -551,8 +576,8 @@ function trackTable(tracks: Track[], kind: string, emptyText = "暂无歌曲", o
     const arrow = item?.key === key ? (item.dir === 1 ? " ↑" : " ↓") : "";
     return `<button class="head-sort" data-act="sortGeneric" data-kind="${kind}" data-key="${key}">${text}${arrow}</button>`;
   };
-  return `${locate}<div class="table-head">
-      <span><button class="sort-default" data-act="resetGenericSort" data-kind="${kind}">#</button></span><span>${mark("title", "标题")}</span><span>${mark("artist", "歌手")}</span><span class="album-head">${mark("album", "专辑")}</span><span style="text-align:right">${mark("duration", "时长")}</span><span></span><span></span>
+  return `${locate}<div class="table-head playlist-head">
+      <span><button class="sort-default" data-act="resetGenericSort" data-kind="${kind}">默认</button></span><span>${mark("title", "标题")}</span><span>${mark("artist", "歌手")}</span><span class="album-head">${mark("album", "专辑")}</span><span style="text-align:right">${mark("duration", "时长")}</span><span><button class="head-sort ${(genericLike[kind] ?? "none") !== "none" ? "active" : ""}" data-act="toggleGenericLiked" data-kind="${kind}">喜欢${likeOrderMark(genericLike[kind] ?? "none")}</button></span><span></span>
     </div>
     <div>${sorted.map((track, index) => trackRow(track, index, kind, options)).join("")}</div>`;
 }
@@ -1017,7 +1042,8 @@ function renderImmersive(): string {
         .join("")
     : `<div class="lyric-line muted">暂无歌词</div>`;
   const coverUrl = cover(track.album?.picUrl, 1200);
-  return `<div class="immersive-lyrics">
+  const offsetLabel = `${songLyricOffset > 0 ? "+" : ""}${(songLyricOffset / 1000).toFixed(2)}s`;
+  return `<div class="immersive-lyrics" style="--im-font:${esc(immersiveConfig.font)};--im-color:${esc(immersiveConfig.color)};--im-opacity:${immersiveConfig.opacity};--im-glow:${immersiveConfig.glow ? "1" : "0"}">
     <div class="immersive-bg" style="background-image:url('${esc(coverUrl)}')"></div>
     <div class="immersive-scrim"></div>
     <div class="immersive-top">
@@ -1026,7 +1052,7 @@ function renderImmersive(): string {
       <div class="immersive-spacer"></div>
     </div>
     <div class="immersive-center"><div class="lyric-box immersive-lyric-box" id="immersive-lyrics">${lyricHtml}</div></div>
-    <canvas class="immersive-spectrum" id="immersive-spectrum"></canvas>
+    ${immersiveConfig.spectrum ? '<canvas class="immersive-spectrum" id="immersive-spectrum"></canvas>' : ""}
     <div class="immersive-progress" id="immersive-progress" title="点击或拖动跳转"><div class="immersive-progress-time" id="immersive-progress-time"></div><div class="immersive-progress-fill" id="immersive-progress-fill"></div></div>
   </div>`;
 }
@@ -1100,6 +1126,7 @@ function renderSong(): string {
   </div>`;
   const lyricColumn = `<div class="song-lyric-column">
     <div class="lyric-box song-lyrics" id="song-lyric" title="点击或滚轮切换歌词进度">${lyricHtml}</div>
+    ${immersiveConfig.lyricSettings ? `<div class="lyric-offset-tool"><span class="lyric-offset-title">偏移</span><button class="icon-btn" data-act="tuneLyricOffset" data-delta="-100" title="提前 0.1 秒">−</button><span id="lyric-offset-value">${(songLyricOffset / 1000).toFixed(2)}s</span><button class="icon-btn" data-act="tuneLyricOffset" data-delta="100" title="延后 0.1 秒">+</button><button class="icon-btn" data-act="resetLyricOffset" title="恢复本曲偏移">↺</button></div>` : ""}
   </div>`;
   const background = cover(track.album?.picUrl, 1600);
   songCommentsOpen = true;
@@ -1450,23 +1477,33 @@ function renderFavoritePicker(): void {
     return;
   }
   const { trackId, playlists } = favoritePicker;
-  const items = playlists.filter((playlist) => playlist.specialType !== 5);
+  const liked = playlists.find((entry) => entry.playlist.specialType === 5);
+  const items = playlists.filter((entry) => entry.playlist.specialType !== 5);
+  const likedNow = likedIds.has(trackId);
   root.innerHTML = `<div class="favorite-backdrop" data-act="closeFavorite">
     <div class="favorite-modal" data-act="noop">
       <div class="favorite-head"><div><b>收藏到歌单</b><div class="muted tiny">选择目标歌单</div></div><button class="icon-btn" data-act="closeFavorite" title="关闭">${icon("close", 14)}</button></div>
-      ${items.length ? `<div class="favorite-list">${items
-        .map(
-          (playlist) => `<button class="favorite-item" data-act="favoriteTo" data-track-id="${trackId}" data-playlist-id="${playlist.id}">
+      <div class="favorite-list">
+        <button class="favorite-item favorite-liked" data-act="likeTrack" data-id="${trackId}">
+          <span class="favorite-like-icon">${icon("heart", 18)}</span>
+          <span class="favorite-meta"><span class="favorite-name">我喜欢的音乐</span><span class="favorite-sub">${likedNow ? "已喜欢" : "添加喜欢"}</span></span>
+          <span class="favorite-action">${likedNow ? "取消喜欢" : "添加喜欢"}</span>
+          ${icon(likedNow ? "check" : "plus", 14)}
+        </button>
+        ${items.map((entry) => {
+          const playlist = entry.playlist;
+          const action = entry.contains ? "取消收藏" : "添加收藏";
+          return `<button class="favorite-item${entry.contains ? " is-contained" : ""}" data-act="${entry.contains ? "favoriteRemove" : "favoriteTo"}" data-track-id="${trackId}" data-playlist-id="${playlist.id}">
             <img loading="lazy" decoding="async" src="${esc(cover(playlist.coverImgUrl, 80))}" alt="">
             <span class="favorite-meta"><span class="favorite-name">${esc(playlist.name)}</span><span class="favorite-sub">${playlist.trackCount} 首</span></span>
-            ${icon("plus", 14)}
-          </button>`,
-        )
-        .join("")}</div>` : `<div class="empty">没有可用的歌单</div>`}
+            <span class="favorite-action">${action}</span>
+            ${icon(entry.contains ? "check" : "plus", 14)}
+          </button>`;
+        }).join("")}
+      </div>
     </div>
   </div>`;
 }
-
 function renderCoverPreview(): void {
   const root = qs("#cover-root");
   if (!root) return;
@@ -1556,18 +1593,13 @@ function playlistDisplayTracks(): Track[] {
         .includes(query),
     );
   }
-  if (playlistLikeOrder !== "none") {
-    tracks.sort((a, b) => (playlistLikeOrder === "first" ? 1 : -1) * (Number(isLiked(b)) - Number(isLiked(a))));
-  }
-  const priorities: Array<"artist" | "album" | "title" | "duration"> = ["artist", "album", "title", "duration"];
-  const activeSorts = priorities
-    .map((key) => playlistSort.find((entry) => entry.key === key))
-    .filter((entry): entry is { key: "title" | "artist" | "album" | "duration"; dir: 1 | -1 } => Boolean(entry));
+  const activeSorts = prioritizedSorts(playlistSort, playlistLikeOrder);
   if (activeSorts.length) {
     tracks.sort((a, b) => {
       for (const sort of activeSorts) {
         let result = 0;
-        if (sort.key === "title") result = a.name.localeCompare(b.name, "zh-CN");
+        if (sort.key === "liked") result = Number(isLiked(a)) - Number(isLiked(b));
+        else if (sort.key === "title") result = a.name.localeCompare(b.name, "zh-CN");
         else if (sort.key === "artist") result = (a.artists[0]?.name ?? "").localeCompare(b.artists[0]?.name ?? "", "zh-CN");
         else if (sort.key === "album") result = (a.album?.name ?? "").localeCompare(b.album?.name ?? "", "zh-CN");
         else result = (a.duration ?? 0) - (b.duration ?? 0);
@@ -1716,16 +1748,13 @@ function renderArtist(): string {
 
 function artistPreviewDisplayTracks(): Track[] {
   const tracks = (page.artist?.songs ?? []).slice(0, 50);
-  if (artistPreviewLikeOrder !== "none") tracks.sort((a, b) => (artistPreviewLikeOrder === "first" ? 1 : -1) * (Number(isLiked(b)) - Number(isLiked(a))));
-  const priorities: Array<"artist" | "album" | "title" | "duration"> = ["artist", "album", "title", "duration"];
-  const active = priorities
-    .map((key) => artistPreviewSort.find((entry) => entry.key === key))
-    .filter((entry): entry is { key: "title" | "artist" | "album" | "duration"; dir: 1 | -1 } => Boolean(entry));
+  const active = prioritizedSorts(artistPreviewSort, artistPreviewLikeOrder);
   if (active.length) {
     tracks.sort((a, b) => {
       for (const sort of active) {
         let result = 0;
-        if (sort.key === "title") result = a.name.localeCompare(b.name, "zh-CN");
+        if (sort.key === "liked") result = Number(isLiked(a)) - Number(isLiked(b));
+        else if (sort.key === "title") result = a.name.localeCompare(b.name, "zh-CN");
         else if (sort.key === "artist") result = (a.artists[0]?.name ?? "").localeCompare(b.artists[0]?.name ?? "", "zh-CN");
         else if (sort.key === "album") result = (a.album?.name ?? "").localeCompare(b.album?.name ?? "", "zh-CN");
         else result = (a.duration ?? 0) - (b.duration ?? 0);
@@ -1819,16 +1848,13 @@ function artistAllDisplayTracks(): Track[] {
         .includes(query),
     );
   }
-  if (artistAllLikeOrder !== "none") tracks.sort((a, b) => (artistAllLikeOrder === "first" ? 1 : -1) * (Number(isLiked(b)) - Number(isLiked(a))));
-  const priorities: Array<"artist" | "album" | "title" | "duration"> = ["artist", "album", "title", "duration"];
-  const active = priorities
-    .map((key) => artistAllSort.find((entry) => entry.key === key))
-    .filter((entry): entry is { key: "title" | "artist" | "album" | "duration"; dir: 1 | -1 } => Boolean(entry));
+  const active = prioritizedSorts(artistAllSort, artistAllLikeOrder);
   if (active.length) {
     tracks.sort((a, b) => {
       for (const sort of active) {
         let result = 0;
-        if (sort.key === "title") result = a.name.localeCompare(b.name, "zh-CN");
+        if (sort.key === "liked") result = Number(isLiked(a)) - Number(isLiked(b));
+        else if (sort.key === "title") result = a.name.localeCompare(b.name, "zh-CN");
         else if (sort.key === "artist") result = (a.artists[0]?.name ?? "").localeCompare(b.artists[0]?.name ?? "", "zh-CN");
         else if (sort.key === "album") result = (a.album?.name ?? "").localeCompare(b.album?.name ?? "", "zh-CN");
         else result = (a.duration ?? 0) - (b.duration ?? 0);
@@ -1987,6 +2013,19 @@ function renderNow(): string {
 
 // ------------------------------------------------------------- interactions
 
+function setLyricOffsetForCurrent(offset: number): void {
+  const trackId = player?.track?.id ?? 0;
+  songLyricOffset = Math.max(-10000, Math.min(10000, Math.round(offset / 100) * 100));
+  if (trackId) {
+    if (songLyricOffset) lyricOffsets.set(trackId, songLyricOffset);
+    else lyricOffsets.delete(trackId);
+    send("setLyricOffset", { trackId, offset: songLyricOffset });
+  }
+  const label = qs<HTMLElement>("#lyric-offset-value");
+  if (label) label.textContent = `${(songLyricOffset / 1000).toFixed(2)}s`;
+  updateSongLyricHighlight();
+}
+
 function leaveImmersive(): void {
   if (!immersiveLyrics) return;
   immersiveLyrics = false;
@@ -2062,6 +2101,18 @@ function onClick(event: Event): void {
       songCommentsOpen = false;
       send("immersive", { active: true });
       render();
+      setTimeout(() => {
+        if (!immersiveLyrics) return;
+        updateSongLyricHighlight();
+        const box = qs<HTMLElement>("#immersive-lyrics");
+        if (box) scrollLyricToIndex(box, songLyricIndex, false);
+      }, 80);
+      break;
+    case "tuneLyricOffset":
+      setLyricOffsetForCurrent(songLyricOffset + Number(el.dataset.delta ?? 0));
+      break;
+    case "resetLyricOffset":
+      setLyricOffsetForCurrent(0);
       break;
     case "exitImmersive":
       leaveImmersive();
@@ -2342,8 +2393,15 @@ function onClick(event: Event): void {
     }
     case "resetGenericSort":
       delete genericSort[el.dataset.kind ?? ""];
+      delete genericLike[el.dataset.kind ?? ""];
       render();
       break;
+    case "toggleGenericLiked": {
+      const kind = el.dataset.kind ?? "";
+      genericLike[kind] = nextLikeOrder(genericLike[kind] ?? "none");
+      render();
+      break;
+    }
     case "sortPlaylist": {
       const key = el.dataset.key as "title" | "artist" | "album" | "duration";
       const existing = playlistSort.find((entry) => entry.key === key);
@@ -2383,7 +2441,17 @@ function onClick(event: Event): void {
       }
       break;
     }
+    case "favoriteRemove":
+      send("favoriteClosed");
+      send("favoriteRemove", {
+        trackId: Number(el.dataset.trackId ?? 0),
+        playlistId: Number(el.dataset.playlistId ?? 0),
+      });
+      favoritePicker = null;
+      renderFavoritePicker();
+      break;
     case "favoriteTo":
+      send("favoriteClosed");
       send("favoriteTo", {
         trackId: Number(el.dataset.trackId ?? 0),
         playlistId: Number(el.dataset.playlistId ?? 0),
@@ -2392,6 +2460,7 @@ function onClick(event: Event): void {
       renderFavoritePicker();
       break;
     case "closeFavorite":
+      send("favoriteClosed");
       favoritePicker = null;
       renderFavoritePicker();
       break;
@@ -2451,7 +2520,11 @@ function onClick(event: Event): void {
       if (wasLiked) likedIds.delete(id);
       else likedIds.add(id);
       send("likeTrack", { id });
-      if (page.kind === "now") render();
+      if (favoritePicker?.trackId === id) {
+        send("favoriteClosed");
+        favoritePicker = null;
+        renderFavoritePicker();
+      } else if (page.kind === "now") render();
       else updateRowLikes();
       break;
     }
@@ -2713,6 +2786,11 @@ function applyInit(state: InitState): void {
   queue = state.queue ?? [];
   queueSources = state.queueSources ?? [];
   page = state.page;
+  sortPriority = state.sortPriority ?? sortPriority;
+  immersiveConfig = state.immersive ?? immersiveConfig;
+  lyricOffsets.clear();
+  for (const [id, offset] of Object.entries(state.lyricOffsets ?? {})) lyricOffsets.set(Number(id), Number(offset));
+  songLyricOffset = lyricOffsets.get(player?.track?.id ?? 0) ?? 0;
   if (page.kind === "song") {
     songPageId = page.song?.track.id ?? 0;
     songCommentsOpen = true;
@@ -2841,6 +2919,21 @@ window.addEventListener("message", (event: MessageEvent<HostMessage>) => {
   switch (msg.type) {
     case "init":
       applyInit(msg.state);
+      break;
+    case "sortPriority":
+      sortPriority = msg.keys;
+      render();
+      break;
+    case "immersiveConfig":
+      immersiveConfig = msg.config;
+      if (immersiveLyrics) render();
+      break;
+    case "lyricOffset":
+      lyricOffsets.set(msg.trackId, msg.offset);
+      if (player?.track?.id === msg.trackId) {
+        songLyricOffset = msg.offset;
+        updateSongLyricHighlight();
+      }
       break;
     case "page":
       if (page.kind !== msg.page.kind || page.title !== msg.page.title) {
