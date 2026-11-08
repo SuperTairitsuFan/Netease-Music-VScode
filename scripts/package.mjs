@@ -2,7 +2,7 @@
 /**
  * Builds one platform-specific .vsix.
  *
- *   node scripts/package.mjs win32-x64
+ *   node scripts/package.mjs linux-x64
  *   node scripts/package.mjs --all
  *
  * Only the matching components/<platform>-<arch>/ directory is copied into the
@@ -17,7 +17,7 @@ import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const pkg = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8"));
-const TARGETS = ["win32-x64", "win32-arm64"];
+const TARGETS = ["win32-x64", "win32-arm64", "linux-x64", "linux-arm64"];
 
 function run(command, args, cwd = root) {
   console.log(`[package] ${command} ${args.join(" ")}`);
