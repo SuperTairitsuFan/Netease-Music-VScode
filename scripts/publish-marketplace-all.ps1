@@ -10,7 +10,7 @@ $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 $pkg = Get-Content (Join-Path $root "package.json") -Raw | ConvertFrom-Json
 $version = $pkg.version
-$targets = @("linux-x64", "linux-arm64", "win32-x64", "win32-arm64")
+$targets = @("win32-x64", "win32-arm64")
 
 if (-not (Test-Path $TokenFile)) {
   throw "Missing Marketplace PAT file: $TokenFile"
@@ -29,7 +29,7 @@ if (-not (Test-Path $vsce)) {
 Push-Location $root
 try {
   foreach ($target in $targets) {
-    $vsix = Join-Path $root "dist-vsix/netease-music-$version-$target.vsix"
+    $vsix = Join-Path $root "dist-vsix/netease-music-vscode-$version-$target.vsix"
     if (-not (Test-Path $vsix)) {
       throw "Missing $vsix. Run: node scripts/package.mjs --all --skip-build"
     }
