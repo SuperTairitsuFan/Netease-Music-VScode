@@ -5,7 +5,7 @@ $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 $pkg = Get-Content (Join-Path $root "package.json") -Raw | ConvertFrom-Json
 $version = $pkg.version
-$vsix = Join-Path $root "dist-vsix/netease-music-$version-win32-x64.vsix"
+$vsix = Join-Path $root "dist-vsix/netease-music-vscode-$version-win32-x64.vsix"
 $tokenFile = Join-Path $env:USERPROFILE ".vsce-token"
 
 if (-not (Test-Path $vsix)) {
