@@ -43,10 +43,8 @@
 - 蓝牙暂停后恢复播放异常
 - 收藏弹窗和歌单加载慢、重复网络请求
 
-> 当前仅提供 Windows 构建；Linux 版本后续单独调试和发布。
 
-
-在 VS Code 里做一个桌面客户端形态的网易云音乐：侧边栏管理歌单，编辑器区浏览歌曲、歌手、专辑、评论，底部状态条控制播放。数据通过 EAPI 获取，可选 Windows WASAPI / ASIO 原生音频输出。当前版本仅发布 Windows x64 / arm64。
+在 VS Code 里做一个桌面客户端形态的网易云音乐：侧边栏管理歌单，编辑器区浏览歌曲、歌手、专辑、评论，底部状态条控制播放。数据通过 EAPI 获取，可选 Windows WASAPI / ASIO 与 Linux ALSA 原生音频输出。
 
 项目只用于个人学习、折腾和自用，不商用，不提供、不托管任何音乐内容。
 
@@ -57,16 +55,16 @@
 ## 当前版本
 
 ```text
-1.3.1
+1.3.2
 ```
 
-Windows 版公开构建发布。
+Windows / Linux 公开构建发布。
 
 当前主要能力：
 
 - 推荐、每日推荐、歌单、歌手、专辑、搜索、排行榜、播客、本地音乐、云盘
 - 歌曲详情、评论、回复、点赞、收藏到歌单
-- 原生 WASAPI Shared / Exclusive、ASIO
+- 原生 WASAPI Shared / Exclusive、ASIO、Linux ALSA
 - 1–8 声道源文件按实际声道输出；设备通道不足时明确报错
 - 沉浸环绕声（5.1）音质选项
 - 双声道 HRTF 空间增强；与 Bit-perfect 互斥
@@ -100,12 +98,14 @@ vscode:extension/AICis.netease-music-vscode
 ```text
 win32-x64
 win32-arm64
+linux-x64
+linux-arm64
 ```
 
 安装示例：
 
 ```bash
-code --install-extension netease-music-vscode-1.3.1-win32-x64.vsix
+code --install-extension netease-music-vscode-1.3.2-win32-x64.vsix
 ```
 
 ## 首次启动
@@ -120,6 +120,7 @@ code --install-extension netease-music-vscode-1.3.1-win32-x64.vsix
 ## 音频
 
 - Windows：WASAPI Shared / Exclusive、ASIO
+- Linux：ALSA
 - WebAudio：默认兼容路径
 - 原生输出按源文件声道数打开；设备输出通道不足时拒绝静默降混
 - 多声道设备可原样输出；双声道设备可开启 HRTF 下混
@@ -145,7 +146,7 @@ WebAudio：不能原样输出 5.1
 
 ## 从源码构建
 
-要求 Windows、Node.js ≥ 20、npm。构建原生组件还需要 [zig](https://ziglang.org/) 0.15.x。Linux 版本暂不构建。
+要求 Node.js ≥ 20、npm。构建原生组件还需要 [zig](https://ziglang.org/) 0.15.x。
 
 ```bash
 npm install
