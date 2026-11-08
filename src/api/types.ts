@@ -82,6 +82,13 @@ export interface PlaylistRef {
   creator?: { userId: number; nickname: string; avatarUrl?: string };
   subscribed?: boolean;
   specialType?: number;
+  /** local cached cover exposed by the extension */
+  cachedCover?: string;
+}
+
+export interface FavoritePickerEntry {
+  playlist: PlaylistRef;
+  contains: boolean;
 }
 
 export interface PlaylistDetail {
@@ -255,6 +262,8 @@ export interface HomeFeed {
 
 export interface ListenTogetherPlayCommand {
   targetSongId?: number;
+  targetSongName?: string;
+  songName?: string;
   formerSongId?: number;
   progress?: number;
   playStatus?: string | number;
