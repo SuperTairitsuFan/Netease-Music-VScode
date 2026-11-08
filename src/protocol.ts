@@ -5,6 +5,7 @@ import type {
   ArtistRef,
   Comment,
   DjRadio,
+  FavoritePickerEntry,
   HomeFeed,
   PlaylistDetail,
   PlaylistRef,
@@ -17,7 +18,7 @@ import type {
   FriendUser,
   PrivateMessage,
 } from "./api/types";
-import type { MusicConfig, PlayMode, Quality, QualityOption } from "./config";
+import type { MusicConfig, PlayMode, Quality, QualityOption, SortKey } from "./config";
 
 export type WebviewSurface = "sidebar" | "main" | "settings" | "extras";
 
@@ -98,6 +99,13 @@ export interface SettingsView {
   showNavigation: boolean;
   showBuffer: boolean;
   showQueue: boolean;
+  immersiveAutoHide: boolean;
+  immersiveSpectrum: boolean;
+  immersiveLyricSettings: boolean;
+  immersiveFont: string;
+  immersiveColor: string;
+  immersiveOpacity: number;
+  immersiveGlow: boolean;
   lyricsEnabled: boolean;
   lyricsStartOnLaunch: boolean;
   lyricsFont: string;
@@ -155,6 +163,7 @@ export interface SettingsView {
   saveLyric: boolean;
   cacheEnabled: boolean;
   cacheMaxSizeMB: number;
+  libraryCacheEnabled: boolean;
 }
 
 export interface ComponentView {
@@ -351,6 +360,8 @@ export interface SidebarState {
   collapsed: Record<string, boolean>;
   version: string;
   listen: ListenTogetherView;
+  visible: string[];
+  accountSet?: boolean;
 }
 
 export interface SettingsState {
@@ -363,6 +374,11 @@ export interface SettingsState {
   version: string;
   platform: string;
   arch: string;
+  sortPriority: SortKey[];
+  sidebarVisible: string[];
+  output: OutputView;
+  actualQuality: string;
+  headsetGestures: import("./config").HeadsetGesture[];
   loggedIn: boolean;
   vip: "none" | "vip" | "svip";
 }
@@ -375,6 +391,9 @@ export interface InitState {
   settings: SettingsView;
   page: PageView;
   panels: Record<string, boolean>;
+  sortPriority: SortKey[];
+  immersive: import("./config").ImmersiveConfig;
+  lyricOffsets: Record<string, number>;
   components: ComponentView[];
   native: NativeStatusView;
   downloads: DownloadTaskView[];
@@ -416,6 +435,12 @@ export type HostMessage =
   | { type: "lyric"; songId: number; lrc: string; translation: string }
   | { type: "friendMessages"; activeId: number; messages: PrivateMessage[] }
   | { type: "spectrum"; bands: number[] }
+  | { type: "sortPriority"; keys: SortKey[] }
+  | { type: "sidebarVisible"; keys: string[] }
+  | { type: "headsetGestures"; gestures: import("./config").HeadsetGesture[] }
+  | { type: "immersiveConfig"; config: import("./config").ImmersiveConfig }
+  | { type: "lyricOffset"; trackId: number; offset: number }
+  | { type: "outputState"; output: OutputView; actualQuality: string }
   | { type: "comments"; view: CommentsView }
   | { type: "commentReplies"; parentId: number; comments: Comment[]; total: number; more: boolean; error?: string }
   | { type: "commentLike"; commentId: number; liked: boolean; likedCount: number }
@@ -441,14 +466,22 @@ export type HostMessage =
   | { type: "loginResult"; ok: boolean; message: string }
   | { type: "openLogin" }
   | { type: "switchTab"; tab: string }
-  | { type: "favoritePicker"; trackId: number; playlists: PlaylistRef[] }
-  | { type: "toggleFavoritePicker"; trackId: number; playlists: PlaylistRef[] }
+  | { type: "favoritePicker"; trackId: number; playlists: FavoritePickerEntry[] }
+  | { type: "toggleFavoritePicker"; trackId: number; playlists: FavoritePickerEntry[] }
   | { type: "playlists"; state: SidebarState };
 
 export type WebviewCommand =
   | "ready"
   | "openDir"
   | "clearCache"
+  | "moveSortPriority"
+  | "setSidebarItem"
+  | "setHeadsetGesture"
+  | "setLyricOffset"
+  | "resetImmersive"
+  | "resetHeadset"
+  | "refreshLibraryCache"
+  | "refreshRecommendCache"
   | "restartApp"
   | "setSleepTimer"
   | "setPlaybackRate"
@@ -467,6 +500,7 @@ export type WebviewCommand =
   | "openArtistByName"
   | "fixSampleRate"
   | "openLiked"
+  | "openAllMusic"
   | "openRecent"
   | "openCollections"
   | "openDownloads"
@@ -522,6 +556,8 @@ export type WebviewCommand =
   | "likeTrack"
   | "openFavorite"
   | "favoriteTo"
+  | "favoriteClosed"
+  | "favoriteRemove"
   | "removeFromPlaylist"
   | "back"
   | "downloadTrack"
