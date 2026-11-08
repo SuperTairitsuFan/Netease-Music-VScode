@@ -5,6 +5,30 @@ import * as vscode from "vscode";
 export type Quality = "standard" | "exhigh" | "lossless" | "hires" | "jyeffect" | "sky" | "jymaster";
 export type OutputMode = "auto" | "webaudio" | "native";
 export type PlayMode = "order" | "repeat" | "repeatOne" | "shuffle";
+export type SortKey = "artist" | "album" | "title" | "duration" | "liked";
+export const DEFAULT_SORT_PRIORITY: SortKey[] = ["artist", "album", "title", "duration", "liked"];
+export const SIDEBAR_ITEMS = ["account", "recommend", "featured", "podcast", "roam", "following", "friends", "all", "liked", "recent", "collections", "downloads", "local", "cloud", "created", "subscribed"] as const;
+export type SidebarItemKey = typeof SIDEBAR_ITEMS[number];
+export const DEFAULT_SIDEBAR_ITEMS: SidebarItemKey[] = [...SIDEBAR_ITEMS];
+export type HeadsetAction = "toggle" | "next" | "previous" | "volumeUp" | "volumeDown" | "none";
+export type HeadsetGestureType = "clicks" | "long";
+export interface HeadsetGesture { type: HeadsetGestureType; count: number; action: HeadsetAction }
+export const DEFAULT_HEADSET_GESTURES: HeadsetGesture[] = [
+  { type: "clicks", count: 1, action: "toggle" },
+  { type: "clicks", count: 2, action: "next" },
+  { type: "clicks", count: 3, action: "previous" },
+  { type: "long", count: 1, action: "none" },
+];
+
+export interface ImmersiveConfig {
+  autoHideSidebar: boolean;
+  spectrum: boolean;
+  lyricSettings: boolean;
+  font: string;
+  color: string;
+  opacity: number;
+  glow: boolean;
+}
 
 export interface MusicConfig {
   output: {
@@ -31,13 +55,17 @@ export interface MusicConfig {
     saveLyric: boolean;
   };
   cover: { dir: string; filenameTemplate: string };
-  cache: { enabled: boolean; dir: string; maxSizeMB: number };
+  cache: { enabled: boolean; dir: string; maxSizeMB: number; libraryEnabled: boolean };
   localMusic: { dir: string };
   api: { baseUrl: string; timeout: number; userAgent: string; realIP: string; cookie: string };
   playback: { volume: number; mode: PlayMode; rememberQueue: boolean; autoPlay: boolean; startOnLaunch: boolean; backgroundPlay: boolean };
   lyricsOverlay: { enabled: boolean; startOnLaunch: boolean; font: string; size: number; color: string; opacity: number; width: number; height: number; locked: boolean; x: number; y: number; weight: number; fontFile: string; borderWidth: number; borderColor: string };
   status: { showTitle: boolean; showLyrics: boolean; showLike: boolean; showFavorite: boolean; showMode: boolean; showNavigation: boolean; showBuffer: boolean; showQueue: boolean };
   ui: { theme: string; showLyrics: boolean; panels: Record<string, boolean>; compact: boolean; autoOpen: boolean };
+  list: { sortPriority: SortKey[] };
+  sidebar: { visible: SidebarItemKey[]; accountSet: boolean };
+  headset: { gestures: HeadsetGesture[] };
+  immersive: ImmersiveConfig;
   components: { dir: string; nativeEnginePath: string; verifyHash: boolean; downloadUrl: string; autoDownload: boolean };
 }
 
@@ -184,6 +212,7 @@ export function getConfig(): MusicConfig {
       enabled: c.get<boolean>("cache.enabled") ?? true,
       dir: c.get<string>("cache.dir") ?? "",
       maxSizeMB: Math.max(64, c.get<number>("cache.maxSizeMB") ?? 1024),
+      libraryEnabled: c.get<boolean>("cache.libraryEnabled") ?? true,
     },
     localMusic: {
       dir: c.get<string>("localMusic.dir") ?? "",
@@ -230,6 +259,41 @@ export function getConfig(): MusicConfig {
       startOnLaunch: c.get<boolean>("playback.startOnLaunch") ?? false,
       backgroundPlay: c.get<boolean>("playback.backgroundPlay") ?? true,
     },
+    headset: {
+      gestures: (() => {
+        const raw = c.get<HeadsetGesture[]>("headset.gestures");
+        if (!Array.isArray(raw)) return [...DEFAULT_HEADSET_GESTURES];
+        const valid = raw.filter((item) => item && ["clicks", "long"].includes(item.type) && Number(item.count) >= 1 && Number(item.count) <= 9);
+        return valid.length ? valid : [...DEFAULT_HEADSET_GESTURES];
+      })(),
+    },
+    immersive: {
+      autoHideSidebar: c.get<boolean>("immersive.autoHideSidebar") ?? true,
+      spectrum: c.get<boolean>("immersive.spectrum") ?? true,
+      lyricSettings: c.get<boolean>("immersive.lyricSettings") ?? true,
+      font: c.get<string>("immersive.font") ?? "Microsoft YaHei UI",
+      color: c.get<string>("immersive.color") ?? "#ffffff",
+      opacity: Math.max(0.2, Math.min(1, c.get<number>("immersive.opacity") ?? 0.92)),
+      glow: c.get<boolean>("immersive.glow") ?? true,
+    },
+    sidebar: {
+      accountSet: c.get<boolean>("sidebar.accountSet") ?? false,
+      visible: (() => {
+        const raw = c.get<string[]>("sidebar.visible");
+        if (!raw) return [...DEFAULT_SIDEBAR_ITEMS];
+        const valid = raw.filter((key): key is SidebarItemKey => SIDEBAR_ITEMS.includes(key as SidebarItemKey));
+        if (!(c.get<boolean>("sidebar.accountSet") ?? false) && !valid.includes("account")) valid.unshift("account");
+        return valid;
+      })(),
+    },
+    list: {
+      sortPriority: (() => {
+        const raw = c.get<string[]>("list.sortPriority") ?? [];
+        const valid = raw.filter((key): key is SortKey => DEFAULT_SORT_PRIORITY.includes(key as SortKey));
+        for (const key of DEFAULT_SORT_PRIORITY) if (!valid.includes(key)) valid.push(key);
+        return valid;
+      })(),
+    },
     ui: {
       theme: c.get<string>("ui.theme") ?? "auto",
       showLyrics: c.get<boolean>("ui.showLyrics") ?? true,
@@ -264,7 +328,11 @@ export function defaultMusicDir(): string {
 }
 
 export function defaultCacheDir(ctx: vscode.ExtensionContext): string {
-  return path.join(ctx.globalStorageUri.fsPath, "cache", "audio");
+  return path.join(ctx.globalStorageUri.fsPath, "cache", "songs");
+}
+
+export function audioCacheDir(ctx: vscode.ExtensionContext, configured?: string): string {
+  return configured ? path.join(configured, "songs") : defaultCacheDir(ctx);
 }
 
 export function defaultComponentsDir(ctx: vscode.ExtensionContext): string {
